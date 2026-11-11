@@ -81,6 +81,8 @@ MTLPixelFormat pixel_format(Format format)
     case Format::eac_rg: return MTLPixelFormatEAC_RG11Unorm;
     case Format::astc_4x4_srgb: return MTLPixelFormatASTC_4x4_sRGB;
     case Format::astc_4x4_unorm: return MTLPixelFormatASTC_4x4_LDR;
+    case Format::astc_6x6_srgb: return MTLPixelFormatASTC_6x6_sRGB;
+    case Format::astc_6x6_unorm: return MTLPixelFormatASTC_6x6_LDR;
     case Format::bc3_srgb: return MTLPixelFormatBC3_RGBA_sRGB;
     case Format::bc3_unorm: return MTLPixelFormatBC3_RGBA;
     case Format::bc5_rg: return MTLPixelFormatBC5_RGUnorm;
