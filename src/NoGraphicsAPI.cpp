@@ -243,6 +243,8 @@ VkFormat to_vk(Format format)
     case Format::eac_rg: return VK_FORMAT_EAC_R11G11_UNORM_BLOCK;
     case Format::astc_4x4_srgb: return VK_FORMAT_ASTC_4x4_SRGB_BLOCK;
     case Format::astc_4x4_unorm: return VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+    case Format::astc_6x6_srgb: return VK_FORMAT_ASTC_6x6_SRGB_BLOCK;
+    case Format::astc_6x6_unorm: return VK_FORMAT_ASTC_6x6_UNORM_BLOCK;
     case Format::bc3_srgb: return VK_FORMAT_BC3_SRGB_BLOCK;
     case Format::bc3_unorm: return VK_FORMAT_BC3_UNORM_BLOCK;
     case Format::bc5_rg: return VK_FORMAT_BC5_UNORM_BLOCK;
@@ -271,6 +273,8 @@ constexpr bool compatible_view_formats(Format image_format, Format view_format) 
         return image.bytes_per_block != 0 && image.bytes_per_block == view.bytes_per_block;
     return (image_format == Format::astc_4x4_unorm && view_format == Format::astc_4x4_srgb) ||
            (image_format == Format::astc_4x4_srgb && view_format == Format::astc_4x4_unorm) ||
+           (image_format == Format::astc_6x6_unorm && view_format == Format::astc_6x6_srgb) ||
+           (image_format == Format::astc_6x6_srgb && view_format == Format::astc_6x6_unorm) ||
            (image_format == Format::bc3_unorm && view_format == Format::bc3_srgb) ||
            (image_format == Format::bc3_srgb && view_format == Format::bc3_unorm) ||
            (image_format == Format::bc6h_ufloat && view_format == Format::bc6h_sfloat) ||
@@ -380,7 +384,9 @@ TextureCompression texture_compression(Format format) noexcept
     case Format::bc7_srgb:
     case Format::bc7_unorm: return TextureCompression::bc;
     case Format::astc_4x4_srgb:
-    case Format::astc_4x4_unorm: return TextureCompression::astc;
+    case Format::astc_4x4_unorm:
+    case Format::astc_6x6_srgb:
+    case Format::astc_6x6_unorm: return TextureCompression::astc;
     case Format::eac_rg: return TextureCompression::etc2;
     default: return TextureCompression::none;
     }
