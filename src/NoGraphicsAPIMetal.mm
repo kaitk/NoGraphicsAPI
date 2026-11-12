@@ -21,6 +21,32 @@ namespace
 {
 thread_local ErrorCallback error_callback = nullptr;
 
+void report_error(const char* operation, NSError* error)
+{
+    fprintf(stderr, "NoGraphicsAPI Metal: %s: %s\n", operation, error ? error.localizedDescription.UTF8String : "creation failed");
+    if (error_callback)
+    {
+        char message[1024];
+        snprintf(message, sizeof(message), "Metal %s: %s", operation, error ? error.localizedDescription.UTF8String : "creation failed");
+        error_callback(message, false);
+    }
+}
+}
+
+void set_error_callback(ErrorCallback callback) noexcept
+{
+    error_callback = callback;
+}
+
+// Everything from here to create_device is Metal 4's, which exists from macOS and iOS 26. A build for an older
+// deployment target links its symbols weakly; create_device asks the OS first, and every other call needs its device.
+// -Wunguarded-availability-new (an error in this file) proves nothing reaches Metal 4 another way.
+#pragma clang attribute push(__attribute__((availability(macos, introduced = 26.0), availability(ios, introduced = 26.0))), \
+                             apply_to = any(function, objc_method, record, enum, type_alias, variable(is_global)))
+
+namespace
+{
+
 constexpr MTLRenderStages render_stages = MTLRenderStageVertex | MTLRenderStageFragment | MTLRenderStageObject | MTLRenderStageMesh;
 
 uint64 align_up(uint64 value, uint64 alignment) { return (value + alignment - 1) / alignment * alignment; }
@@ -136,23 +162,8 @@ MTLTextureDescriptor* texture_descriptor(const TextureDesc& desc)
     return result;
 }
 
-void report_error(const char* operation, NSError* error)
-{
-    fprintf(stderr, "NoGraphicsAPI Metal: %s: %s\n", operation, error ? error.localizedDescription.UTF8String : "creation failed");
-    if (error_callback)
-    {
-        char message[1024];
-        snprintf(message, sizeof(message), "Metal %s: %s", operation, error ? error.localizedDescription.UTF8String : "creation failed");
-        error_callback(message, false);
-    }
-}
 
 MTLSize metal_size(uint32x3 size) { return MTLSizeMake(size.x, size.y, size.z); }
-}
-
-void set_error_callback(ErrorCallback callback) noexcept
-{
-    error_callback = callback;
 }
 
 struct GpuHeapOwner
@@ -507,7 +518,7 @@ id<MTLBuffer> resolve_buffer(Device* device, GpuRange range, uint64* offset)
 }
 }
 
-DeviceInit create_device(const DeviceDesc& desc) noexcept
+DeviceInit create_metal4_device(const DeviceDesc& desc) noexcept
 {
     if (desc.swapchain_color_space != ColorSpace::srgb)
     {
@@ -1849,6 +1860,15 @@ void draw_meshlets_indirect(CommandBuffer* commands, const void* root, GpuRange 
             [commands->render drawMeshThreadgroupsWithIndirectBuffer:reinterpret_cast<uintptr>(arguments.gpu) + i * stride
                                         threadsPerObjectThreadgroup:commands->pso->object_threads threadsPerMeshThreadgroup:commands->pso->threads];
     }
+}
+
+#pragma clang attribute pop
+
+DeviceInit create_device(const DeviceDesc& desc) noexcept
+{
+    if (@available(macOS 26.0, iOS 26.0, *)) return create_metal4_device(desc);
+    report_error("Metal 4 requires macOS or iOS 26", nil);
+    return {.error = Error::unsupported};
 }
 
 } // namespace gpu

@@ -40,6 +40,11 @@ cmake --build build-ios --config Release
 ```
 
 Compile metallibs for the target SDK; macOS libraries cannot be used on iOS. See [Slang compilation](slang.md).
+
+An application that also runs on older systems can set an older deployment target. Metal 4's symbols are then
+linked weakly, and `create_device()` returns `Error::unsupported` before macOS or iOS 26, so the application can
+choose another renderer; the backend is marked available from 26 and `-Wunguarded-availability-new` is an error
+in it, so nothing reaches Metal 4 except through a device. The Simulator SDK declares no Metal 4 types.
 For presentation, supply an application-owned `CAMetalLayer*` as `DeviceDesc::window`.
 
 Vulkan tests also build a private compatibility library: `_buffer_commands` tests force buffer commands
