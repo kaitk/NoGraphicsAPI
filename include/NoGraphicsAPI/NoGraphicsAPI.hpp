@@ -282,6 +282,9 @@ enum class TextureUsage : uint32
     depth_stencil_attachment = 1u << 3u,
     transfer_source = 1u << 4u,
     transfer_destination = 1u << 5u,
+    // A color or depth/stencil attachment whose contents live only within a render pass: never loaded, stored, or sampled.
+    // Metal makes it memoryless, outside the texture heap: zero heap size, and the heap may be empty. Vulkan places it as a transient attachment.
+    transient = 1u << 6u,
 };
 
 enum class TextureDescriptorType : uint8
@@ -505,6 +508,7 @@ struct TextureDesc
     Format format = Format::rgba8_unorm;
     bool mutable_format = false; // Allow format-compatible descriptor views, but could lose DCC.
     TextureUsage usage = TextureUsage::sampled;
+    uint32 sample_count = 1; // 1, or 4 for a multisampled 2D attachment (every supported GPU has 4x color and depth).
 };
 
 struct RenderViewDesc
@@ -632,6 +636,7 @@ struct GraphicsPSODesc
     Format depth_format = Format::undefined;
     Format stencil_format = Format::undefined;
     RasterizationState rasterization = {};
+    uint32 sample_count = 1; // Matches the pass's attachments.
 };
 
 struct MeshPSODesc
@@ -643,6 +648,7 @@ struct MeshPSODesc
     Format depth_format = Format::undefined;
     Format stencil_format = Format::undefined;
     RasterizationState rasterization = {};
+    uint32 sample_count = 1; // Matches the pass's attachments.
 };
 
 struct ClearColor
@@ -659,6 +665,8 @@ struct ColorAttachment
     LoadOp load = LoadOp::load;
     StoreOp store = StoreOp::store;
     ClearColor clear = {};
+    // A single-sample view the multisampled attachment is averaged into at the pass's end (its last segment); store may then discard.
+    RenderView* resolve_view = nullptr;
 };
 
 struct DepthAttachment

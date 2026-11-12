@@ -242,6 +242,12 @@ Each segment repeats the rendering description and has its own begin/end pair; o
 or clears, and only the last stores. Submit the full chain in order in one batch, without action
 commands, synchronization, or other passes between segments. Each buffer sets its own bindings.
 
+Multisampling is 4x, the count every Vulkan device offers for color and depth attachments: `TextureDesc::sample_count`
+and the PSO's `sample_count` match. `ColorAttachment::resolve_view` averages the attachment into a single-sample view at the
+end of rendering (`VK_RESOLVE_MODE_AVERAGE_BIT`), so a multisampled attachment is usually never stored. `TextureUsage::transient`
+adds `VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT`; such an image is still placed in the texture heap, as the backend selects one
+memory type and desktop GPUs have no lazily allocated memory. Tilers may skip its memory traffic.
+
 The raster path has empty fixed vertex input because shaders fetch through GPU pointers. Mesh PSOs
 use `VK_EXT_mesh_shader`, with task and mesh support enabled as part of the fixed device baseline.
 `MeshPSODesc::task` adds a task stage before `mesh`; direct and indirect draw counts then launch
