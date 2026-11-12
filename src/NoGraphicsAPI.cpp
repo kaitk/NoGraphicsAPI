@@ -42,7 +42,6 @@ constexpr uint32 max_queue_families = 64;
 constexpr uint32 queue_type_count = 3; // General, compute-only, copy-only.
 constexpr uint32 max_color_attachments = 8;
 constexpr uint32 max_swapchain_images = 8;
-constexpr VkPresentModeKHR swapchain_present_mode = VK_PRESENT_MODE_FIFO_KHR;
 constexpr uint32 gpu_allocation_alignment = 16;
 constexpr uint32 max_surface_formats = 64;
 constexpr uint32 format_count = static_cast<uint32>(Format::undefined);
@@ -687,6 +686,7 @@ struct Device
     detail::Queue* queues = nullptr;
     uint32 queue_count = 0;
     VkSurfaceKHR surface = VK_NULL_HANDLE;
+    VkPresentModeKHR present_mode = VK_PRESENT_MODE_FIFO_KHR;
     uint32 queue_families[queue_type_count]{};
     uint32 queue_family_count = 0;
     uint32 timestamp_query_count = 0;
@@ -1905,6 +1905,23 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
         return fail_device_creation(state, Error::unsupported, candidate_diagnostics);
 
     state->physical_device = selected.physical_device;
+    if (presentation && !desc.vsync)
+    {
+        // Immediate, else mailbox, where the surface offers them; FIFO otherwise. Immediate
+        // first: full screen on NVIDIA, mailbox is held to the refresh.
+        VkPresentModeKHR modes[16]{};
+        uint32 mode_count = 16;
+        if (vkGetPhysicalDeviceSurfacePresentModesKHR(state->physical_device, state->surface, &mode_count, modes) >= VK_SUCCESS)
+        {
+            bool mailbox = false, immediate = false;
+            for (uint32 i = 0; i < mode_count; ++i)
+            {
+                mailbox |= modes[i] == VK_PRESENT_MODE_MAILBOX_KHR;
+                immediate |= modes[i] == VK_PRESENT_MODE_IMMEDIATE_KHR;
+            }
+            state->present_mode = immediate ? VK_PRESENT_MODE_IMMEDIATE_KHR : mailbox ? VK_PRESENT_MODE_MAILBOX_KHR : VK_PRESENT_MODE_FIFO_KHR;
+        }
+    }
     state->physical_properties = selected.properties;
     state->heap_properties = selected.heap_properties;
     state->max_timeline_value_difference = selected.vulkan12_properties.maxTimelineSemaphoreValueDifference;
@@ -2316,7 +2333,7 @@ Error recreate_swapchain(Swapchain& swapchain) noexcept
     assert(!swapchain.acquired && !device.acquired_swapchain);
     const VkSurfacePresentModeKHR present_mode_info{
         .sType = VK_STRUCTURE_TYPE_SURFACE_PRESENT_MODE_KHR,
-        .presentMode = swapchain_present_mode,
+        .presentMode = device.present_mode,
     };
     const VkPhysicalDeviceSurfaceInfo2KHR surface_info{
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR,
@@ -2391,7 +2408,7 @@ Error recreate_swapchain(Swapchain& swapchain) noexcept
     const VkSwapchainPresentModesCreateInfoKHR present_modes_info{
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODES_CREATE_INFO_KHR,
         .presentModeCount = 1,
-        .pPresentModes = &swapchain_present_mode,
+        .pPresentModes = &device.present_mode,
     };
     const VkSwapchainCreateInfoKHR create_info{
         .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR,
@@ -2408,7 +2425,7 @@ Error recreate_swapchain(Swapchain& swapchain) noexcept
         .pQueueFamilyIndices = device.queue_families,
         .preTransform = capabilities.currentTransform,
         .compositeAlpha = composite_alpha,
-        .presentMode = swapchain_present_mode,
+        .presentMode = device.present_mode,
         .clipped = VK_TRUE,
         .oldSwapchain = old_handle,
     };
