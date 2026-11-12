@@ -106,6 +106,12 @@ execution-only dependencies do not flush caches.
 Suspended render passes use native suspend/resume encoding; requested load/clear and store operations apply
 to the first and last segments respectively.
 
+Multisampled attachments (`TextureDesc::sample_count` 4, with the PSO's `sample_count` to match) resolve through
+`ColorAttachment::resolve_view` as the pass stores each tile (`MTLStoreActionMultisampleResolve`), so the samples stay
+in tile memory. A `TextureUsage::transient` attachment is memoryless: the device makes it outside the placement heap,
+`get_texture_size_align` reports zero bytes for it, `create_texture` accepts an empty heap for it, and it never enters
+a residency set. Together a 4x color and depth target costs no memory and no bandwidth beyond the resolved image.
+
 Metal 4 command pools map to reusable command allocators.
 Pools and queues are externally synchronized; independent pools can record concurrently.
 GPU-signaled shared events provide cross-queue synchronization and CPU completion waits.

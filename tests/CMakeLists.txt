@@ -129,6 +129,20 @@ add_test(NAME test_render_continuation COMMAND test_render_continuation)
 set_tests_properties(test_render_continuation PROPERTIES
     SKIP_RETURN_CODE 77 TIMEOUT 60 FAIL_REGULAR_EXPRESSION "Validation Error;NoGraphicsAPI validation:")
 
+set(msaa_vertex_spv ${CMAKE_CURRENT_BINARY_DIR}/shaders/msaa.vert.${NOGRAPHICSAPI_SHADER_EXTENSION})
+set(msaa_fragment_spv ${CMAKE_CURRENT_BINARY_DIR}/shaders/msaa.frag.${NOGRAPHICSAPI_SHADER_EXTENSION})
+NoGraphicsAPI_compile_slang(${msaa_vertex_spv} ${CMAKE_CURRENT_SOURCE_DIR}/msaa.slang vertexMain vertex)
+NoGraphicsAPI_compile_slang(${msaa_fragment_spv} ${CMAKE_CURRENT_SOURCE_DIR}/msaa.slang fragmentMain fragment)
+add_executable(test_msaa msaa_test.cpp ${msaa_vertex_spv} ${msaa_fragment_spv})
+NoGraphicsAPI_disable_exceptions(test_msaa)
+target_link_libraries(test_msaa PRIVATE NoGraphicsAPI::NoGraphicsAPI)
+target_compile_definitions(test_msaa PRIVATE
+    NOGRAPHICSAPI_MSAA_VERTEX_SPV="${msaa_vertex_spv}"
+    NOGRAPHICSAPI_MSAA_FRAGMENT_SPV="${msaa_fragment_spv}")
+add_test(NAME test_msaa COMMAND test_msaa)
+set_tests_properties(test_msaa PROPERTIES
+    SKIP_RETURN_CODE 77 TIMEOUT 60 FAIL_REGULAR_EXPRESSION "Validation Error;NoGraphicsAPI validation:")
+
 add_executable(test_command_addresses command_addresses_test.cpp ${continuation_vertex_spv} ${continuation_fragment_spv})
 NoGraphicsAPI_disable_exceptions(test_command_addresses)
 target_link_libraries(test_command_addresses PRIVATE NoGraphicsAPI::NoGraphicsAPI)

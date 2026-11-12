@@ -353,7 +353,8 @@ constexpr uint32 known_texture_usage_bits =
     static_cast<uint32>(TextureUsage::color_attachment) |
     static_cast<uint32>(TextureUsage::depth_stencil_attachment) |
     static_cast<uint32>(TextureUsage::transfer_source) |
-    static_cast<uint32>(TextureUsage::transfer_destination);
+    static_cast<uint32>(TextureUsage::transfer_destination) |
+    static_cast<uint32>(TextureUsage::transient);
 
 bool has_valid_texture_usage_bits(TextureUsage usage) noexcept
 {
@@ -897,7 +898,8 @@ bool fits_image_format_properties(const VkImageCreateInfo& image_info, const VkI
            image_info.extent.height <= properties.maxExtent.height &&
            image_info.extent.depth <= properties.maxExtent.depth &&
            image_info.mipLevels <= properties.maxMipLevels &&
-           image_info.arrayLayers <= properties.maxArrayLayers;
+           image_info.arrayLayers <= properties.maxArrayLayers &&
+           (properties.sampleCounts & image_info.samples) != 0;
 }
 
 bool supports_image_create_info(Device& device, const VkImageCreateInfo& image_info, VkImageFormatProperties* output = nullptr) noexcept
@@ -978,6 +980,22 @@ bool select_texture_memory_type(Device& device) noexcept
     const VkMemoryRequirements color_requirements = image_memory_requirements(device, image_info);
     uint32 memory_type_bits = color_requirements.memoryTypeBits;
     include_texture_heap_alignment(device, color_requirements);
+
+    // 4x transient color and depth attachments share the texture heaps.
+    constexpr VkFormat transient_formats[]{VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT};
+    image_info.samples = VK_SAMPLE_COUNT_4_BIT;
+    for (VkFormat format : transient_formats)
+    {
+        image_info.format = format;
+        image_info.usage = VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT |
+                           (format == VK_FORMAT_D32_SFLOAT ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+        if (!supports_image_create_info(device, image_info))
+            continue;
+        const VkMemoryRequirements requirements = image_memory_requirements(device, image_info);
+        memory_type_bits &= requirements.memoryTypeBits;
+        include_texture_heap_alignment(device, requirements);
+    }
+    image_info.samples = VK_SAMPLE_COUNT_1_BIT;
 
     constexpr TextureUsage broad_texture_usage = TextureUsage::sampled | TextureUsage::storage | TextureUsage::transfer_destination;
     const VkFormatFeatureFlags2 broad_features = device.format_features[static_cast<uint32>(Format::rgba32_float)];
@@ -2648,6 +2666,10 @@ void prepare_texture(Device& device, const TextureDesc& desc, PreparedTexture& o
     if (has_flag(desc.usage, TextureUsage::depth_stencil_attachment)) usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     if (has_flag(desc.usage, TextureUsage::transfer_source)) usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     if (has_flag(desc.usage, TextureUsage::transfer_destination)) usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    if (has_flag(desc.usage, TextureUsage::transient)) usage |= VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
+    assert(!has_flag(desc.usage, TextureUsage::transient) || (usage & ~(VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                                                                          VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) == 0);
+    assert((desc.sample_count == 1 || desc.sample_count == 4) && (desc.sample_count == 1 || (desc.type == TextureType::two_d && desc.mip_levels == 1)));
 
     const VkImageType image_type = to_vk(desc.type);
     const VkFormat format = to_vk(desc.format);
@@ -2688,7 +2710,7 @@ void prepare_texture(Device& device, const TextureDesc& desc, PreparedTexture& o
         },
         .mipLevels = desc.mip_levels,
         .arrayLayers = desc.layer_count,
-        .samples = VK_SAMPLE_COUNT_1_BIT,
+        .samples = static_cast<VkSampleCountFlagBits>(desc.sample_count),
         .tiling = VK_IMAGE_TILING_OPTIMAL,
         .usage = usage,
         .sharingMode = device.queue_family_count > 1 ? VK_SHARING_MODE_CONCURRENT : VK_SHARING_MODE_EXCLUSIVE,
@@ -3026,7 +3048,7 @@ constexpr VkDescriptorSetAndBindingMappingEXT root_mapping{
 };
 
 PSO* create_raster_pso(Device* device, const ShaderStage& first_stage, const ShaderStage& fragment, Span<const ColorTargetDesc> color_targets,
-                       Format depth_format, Format stencil_format, const RasterizationState& rasterization_state,
+                       Format depth_format, Format stencil_format, const RasterizationState& rasterization_state, uint32 sample_count,
                        bool mesh, const ShaderStage& task = {}) noexcept
 {
     assert(device && "PSO creation called with a null device");
@@ -3104,7 +3126,7 @@ PSO* create_raster_pso(Device* device, const ShaderStage& first_stage, const Sha
     };
     const VkPipelineMultisampleStateCreateInfo multisample{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+        .rasterizationSamples = static_cast<VkSampleCountFlagBits>(sample_count),
     };
     const VkPipelineDepthStencilStateCreateInfo depth_stencil{
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO,
@@ -3195,13 +3217,13 @@ PSO* create_raster_pso(Device* device, const ShaderStage& first_stage, const Sha
 PSO* create_graphics_pso(Device* device, const GraphicsPSODesc& desc) noexcept
 {
     return create_raster_pso(device, desc.vertex, desc.fragment, desc.color_targets, desc.depth_format,
-                             desc.stencil_format, desc.rasterization, false);
+                             desc.stencil_format, desc.rasterization, desc.sample_count, false);
 }
 
 PSO* create_mesh_pso(Device* device, const MeshPSODesc& desc) noexcept
 {
     return create_raster_pso(device, desc.mesh, desc.fragment, desc.color_targets, desc.depth_format,
-                             desc.stencil_format, desc.rasterization, true, desc.task);
+                             desc.stencil_format, desc.rasterization, desc.sample_count, true, desc.task);
 }
 
 PSO* create_compute_pso(Device* device, const ShaderStage& compute) noexcept
@@ -3835,6 +3857,9 @@ void begin_render_pass(CommandBuffer* commands, const RenderingDesc& desc, Rende
             .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
             .imageView = attachment.render_view->view,
             .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .resolveMode = attachment.resolve_view ? VK_RESOLVE_MODE_AVERAGE_BIT : VK_RESOLVE_MODE_NONE,
+            .resolveImageView = attachment.resolve_view ? attachment.resolve_view->view : VK_NULL_HANDLE,
+            .resolveImageLayout = VK_IMAGE_LAYOUT_GENERAL,
             .loadOp = static_cast<VkAttachmentLoadOp>(attachment.load),
             .storeOp = static_cast<VkAttachmentStoreOp>(attachment.store),
             .clearValue = {

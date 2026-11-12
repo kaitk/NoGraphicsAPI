@@ -313,7 +313,8 @@ static_assert(sizeof(gpu::TextureFormatInfo) == 16 &&
               offsetof(gpu::TextureFormatInfo, bytes_per_block) == 8 &&
               offsetof(gpu::TextureFormatInfo, stencil) == 13);
 static_assert(sizeof(gpu::SwapchainFrame) == 16 && offsetof(gpu::SwapchainFrame, extent) == 8);
-static_assert(sizeof(gpu::TextureDesc) == 32 && offsetof(gpu::TextureDesc, extent) == 4 && offsetof(gpu::TextureDesc, usage) == 28);
+static_assert(sizeof(gpu::TextureDesc) == 36 && offsetof(gpu::TextureDesc, extent) == 4 && offsetof(gpu::TextureDesc, usage) == 28 &&
+              offsetof(gpu::TextureDesc, sample_count) == 32);
 static_assert(sizeof(gpu::TextureCopyDesc) == 56 && offsetof(gpu::TextureCopyDesc, offset) == 12 &&
               offsetof(gpu::TextureCopyDesc, extent) == 24);
 static_assert(sizeof(gpu::Viewport) == 24 && alignof(gpu::Viewport) == 4 &&

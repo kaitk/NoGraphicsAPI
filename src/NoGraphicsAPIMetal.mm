@@ -117,7 +117,8 @@ MTLTextureType texture_type(TextureType type)
 MTLTextureDescriptor* texture_descriptor(const TextureDesc& desc)
 {
     MTLTextureDescriptor* result = [MTLTextureDescriptor new];
-    result.textureType = texture_type(desc.type);
+    result.textureType = desc.sample_count > 1 ? MTLTextureType2DMultisample : texture_type(desc.type);
+    result.sampleCount = desc.sample_count;
     result.pixelFormat = pixel_format(desc.format);
     result.width = desc.extent.x;
     result.height = desc.extent.y;
@@ -125,7 +126,7 @@ MTLTextureDescriptor* texture_descriptor(const TextureDesc& desc)
     result.mipmapLevelCount = desc.mip_levels;
     result.arrayLength = desc.type == TextureType::cube_array ? desc.layer_count / 6 :
                          desc.type == TextureType::two_d_array ? desc.layer_count : 1;
-    result.storageMode = MTLStorageModePrivate;
+    result.storageMode = has_usage(desc.usage, TextureUsage::transient) ? MTLStorageModeMemoryless : MTLStorageModePrivate;
     result.hazardTrackingMode = MTLHazardTrackingModeUntracked;
     result.usage = MTLTextureUsageUnknown;
     if (has_usage(desc.usage, TextureUsage::sampled)) result.usage |= MTLTextureUsageShaderRead;
@@ -840,6 +841,7 @@ SizeAlign get_texture_size_align(Device* device, const TextureDesc& desc) noexce
             report_error("unsupported texture format or usage", nil);
             return {};
         }
+        if (has_usage(desc.usage, TextureUsage::transient)) return {.size = 0, .align = 1};
         MTLTextureDescriptor* descriptor = texture_descriptor(desc);
         const MTLSizeAndAlign result = [device->metal heapTextureSizeAndAlignWithDescriptor:descriptor];
         [descriptor release];
@@ -853,12 +855,15 @@ Texture* create_texture(Device* device, const TextureDesc& desc, const TextureHe
 {
     @autoreleasepool
     {
-        assert(device && heap.owner && heap.owner->device == device);
+        // Heaps can't hold memoryless textures; the device makes them, with no storage to place.
+        const bool transient = has_usage(desc.usage, TextureUsage::transient);
+        assert(device && (transient || (heap.owner && heap.owner->device == device)));
         MTLTextureDescriptor* descriptor = texture_descriptor(desc);
-        id<MTLTexture> texture = [heap.owner->heap newTextureWithDescriptor:descriptor offset:offset];
+        id<MTLTexture> texture = transient ? [device->metal newTextureWithDescriptor:descriptor] :
+                                             [heap.owner->heap newTextureWithDescriptor:descriptor offset:offset];
         [descriptor release];
         if (!texture) { report_error("texture", nil); return nullptr; }
-        if (device->shader_validation) add_resident(device, texture);
+        if (!transient && device->shader_validation) add_resident(device, texture); // Residency sets reject memoryless textures.
         return new Texture{.device = device, .texture = texture, .desc = desc};
     }
 }
@@ -868,7 +873,8 @@ void destroy_texture(Texture* texture) noexcept
     @autoreleasepool
     {
         if (!texture) return;
-        if (texture->device->shader_validation) remove_resident(texture->device, texture->texture);
+        if (!has_usage(texture->desc.usage, TextureUsage::transient) && texture->device->shader_validation)
+            remove_resident(texture->device, texture->texture);
         [texture->texture release];
         delete texture;
     }
@@ -1111,6 +1117,7 @@ PSO* create_graphics_pso(Device* device, const GraphicsPSODesc& desc) noexcept
         pipeline.vertexFunctionDescriptor = vertex;
         pipeline.fragmentFunctionDescriptor = fragment;
         pipeline.inputPrimitiveTopology = MTLPrimitiveTopologyClassTriangle;
+        pipeline.rasterSampleCount = desc.sample_count;
         color_targets(pipeline.colorAttachments, desc.color_targets);
         NSError* error = nil;
         id<MTLRenderPipelineState> state = [device->compiler newRenderPipelineStateWithDescriptor:pipeline compilerTaskOptions:nil error:&error];
@@ -1141,6 +1148,7 @@ PSO* create_mesh_pso(Device* device, const MeshPSODesc& desc) noexcept
         pipeline.fragmentFunctionDescriptor = fragment;
         pipeline.requiredThreadsPerMeshThreadgroup = metal_size(desc.mesh.threadgroup_size);
         if (task) pipeline.requiredThreadsPerObjectThreadgroup = metal_size(desc.task.threadgroup_size);
+        pipeline.rasterSampleCount = desc.sample_count;
         color_targets(pipeline.colorAttachments, desc.color_targets);
         NSError* error = nil;
         id<MTLRenderPipelineState> state = [device->compiler newRenderPipelineStateWithDescriptor:pipeline compilerTaskOptions:nil error:&error];
@@ -1635,6 +1643,15 @@ void begin_render_pass(CommandBuffer* commands, const RenderingDesc& desc, Rende
             {
                 const ColorAttachment& color = desc.colors.data[i];
                 render_attachment(pass.colorAttachments[i], color.render_view, color.load, color.store);
+                RenderView* resolve = color.resolve_view;
+                pass.colorAttachments[i].resolveTexture = resolve ? resolve->texture : nil;
+                if (resolve)
+                {
+                    pass.colorAttachments[i].resolveLevel = resolve->mip;
+                    pass.colorAttachments[i].resolveSlice = resolve->slice;
+                    pass.colorAttachments[i].storeAction = color.store == StoreOp::store ? MTLStoreActionStoreAndMultisampleResolve
+                                                                                         : MTLStoreActionMultisampleResolve;
+                }
                 pass.colorAttachments[i].clearColor = MTLClearColorMake(color.clear.x, color.clear.y, color.clear.z, color.clear.w);
                 if (!area) area = color.render_view;
             }
@@ -1678,7 +1695,7 @@ void end_render_pass(CommandBuffer* commands) noexcept
             [commands->commands endCommandBuffer];
             commands->commands = nil;
         }
-        for (uint32 i = 0; i < 8; ++i) pass.colorAttachments[i].texture = nil;
+        for (uint32 i = 0; i < 8; ++i) pass.colorAttachments[i].texture = pass.colorAttachments[i].resolveTexture = nil;
         pass.depthAttachment.texture = nil;
         pass.stencilAttachment.texture = nil;
     }
