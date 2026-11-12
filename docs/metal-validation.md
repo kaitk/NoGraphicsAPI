@@ -1,7 +1,10 @@
-# Metal 4 validation
+# Metal validation
 
-Tested on Apple M3 Max, macOS 26.6.2, Xcode 27 and stock Slang 2026.18.2. The integrating bad_sdf
-application also runs on iPhone 15 Pro. M1/M2 hardware execution remains unverified.
+The 18 October 2026 Release run on Apple A18 Pro, macOS 27.0.1, Xcode 27.1 and Slang 2026.20 passes
+**36 of 37 tests** with API and shader validation, subject to the instrumentation exceptions below. No tests are skipped.
+The remaining failure is the native render-timestamp issue below. The library and utilities also compile for arm64 iOS 26;
+this is compile coverage, not a device test. Earlier hardware coverage includes M3 Max.
+M1/M2 hardware execution remains unverified. The backend requires Metal 4, OS 26+ and Apple GPU family 7 or newer.
 
 ## Running the checks
 
@@ -11,20 +14,24 @@ Follow the [macOS build instructions](../README.md#macos-installation-and-quick-
 MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 ctest --test-dir build --output-on-failure
 ```
 
-The 27 September 2026 Release run passes **29 of 30 CTests** with API validation.
 `test_render_continuation` exposes the [native render-timestamp failure](repro-metal-render-timestamps.md).
 Add `-E '^test_render_continuation$'` to run the remaining checks separately.
 
 Coverage includes shared root layouts, GPU pointers, descriptor indexing/copies, direct and indirect
 commands, texture transfers, viewport orientation, presentation and command-pool reuse. Triangle,
 cube and deferred-renderer examples run with Metal API validation.
+Presentation tests cover default and Steam-compatible modes with two and three drawables, two frames in flight,
+resize after idle, shutdown and the layer's framebuffer-only setting. Native execution of the Steam-compatible cases remains pending.
+The tests do not load Steam; overlay composition must also be checked in the installed game with `steam_overlay_compatibility` enabled.
 
 ## Concurrency and lifetime
 
 Tests exercise independent recording, cross-queue waits, heap creation/destruction, concurrent
 updates to disjoint descriptor slots, timestamp allocation and CPU retrieval. Address-index tests
-reach the 64-heap limit and repeatedly wrap snapshot storage. These checks pass with API and shader
-validation. See [the implementation](metal-support.md) for synchronization responsibilities.
+reach the 64-heap limit and repeatedly reuse entries. The shared CPU address-map test also exercises concurrent
+lookups during registration and removal. Timeline retirement checks cover future cross-queue waits,
+transitive completion, polling, nonzero initial values and immediate resource destruction.
+See [the implementation](metal-support.md) for synchronization responsibilities.
 
 ## Stage dependencies and overlap
 

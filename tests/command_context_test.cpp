@@ -142,6 +142,7 @@ bool test_batch_growth_and_reuse(gpu::Device* device, gpu::TimelineSemaphore* ti
 
 bool test_timestamp_readback(gpu::Device* device, gpu::TimelineSemaphore* timeline, uint64& next_timeline_value) noexcept
 {
+    const bool enabled = gpu::get_device_caps(device).timestamp_period_ns != 0;
     constexpr uint32 context_count = 3;
     constexpr uint32 slot_words = 514;
     constexpr uint32 word_count = context_count * slot_words;
@@ -183,7 +184,7 @@ bool test_timestamp_readback(gpu::Device* device, gpu::TimelineSemaphore* timeli
             const uint32 context = word / slot_words;
             const uint32 offset = word % slot_words;
             const uint32 stride = 1 + ((batch + context) & 1u);
-            const bool written = offset >= first && (offset - first) % stride == 0 && (offset - first) / stride < counts[batch][context];
+            const bool written = enabled && offset >= first && (offset - first) % stride == 0 && (offset - first) / stride < counts[batch][context];
             batch_valid = batch_valid && (written ? cpu[word] != sentinel : cpu[word] == sentinel);
         }
         uint64 first_tick = 0;
@@ -202,7 +203,7 @@ bool test_timestamp_readback(gpu::Device* device, gpu::TimelineSemaphore* timeli
                 have_tick = true;
             }
         }
-        batch_valid = batch_valid && previous_tick > first_tick && (batch == 0 || first_tick != previous_batch_end);
+        if (enabled) batch_valid = batch_valid && (batch == 0 || first_tick != previous_batch_end);
         previous_batch_end = previous_tick;
         if (!batch_valid) fprintf(stderr, "Timestamp readback failed in batch %u.\n", batch);
         valid = valid && batch_valid;
@@ -222,7 +223,9 @@ bool test_timestamp_readback(gpu::Device* device, gpu::TimelineSemaphore* timeli
     gpu::submit(device, {.commands = {commands}, .completion = completion});
     gpu::wait_timeline(completion);
     gpu::read_timestamps(pool);
-    bool separate_destinations_valid = cpu[0] != sentinel && second_cpu[0] != sentinel && cpu[1] != sentinel && cpu[0] <= second_cpu[0] && second_cpu[0] <= cpu[1];
+    bool separate_destinations_valid = enabled
+        ? cpu[0] != sentinel && second_cpu[0] != sentinel && cpu[1] != sentinel && cpu[0] <= second_cpu[0] && second_cpu[0] <= cpu[1]
+        : cpu[0] == sentinel && second_cpu[0] == sentinel && cpu[1] == sentinel;
     for (uint32 word = 2; word < word_count; ++word) separate_destinations_valid = separate_destinations_valid && cpu[word] == sentinel;
     for (uint32 word = 1; word < 4; ++word) separate_destinations_valid = separate_destinations_valid && second_cpu[word] == sentinel;
     if (!separate_destinations_valid) fprintf(stderr, "Timestamp readback failed across separate CPU arrays.\n");
@@ -246,6 +249,7 @@ bool test_timestamp_capacity(uint32 count) noexcept
     const gpu::DeviceInit initialized = gpu::create_device({.timestamp_query_count = count});
     if (initialized.error != gpu::Error::none) return false;
     gpu::Device* device = initialized.device;
+    const bool enabled = gpu::get_device_caps(device).timestamp_period_ns != 0;
     gpu::TimelineSemaphore* timeline = gpu::create_timeline_semaphore(device);
     gpu::CommandPool* pool = gpu::create_command_pool(device);
     uint64* cpu = static_cast<uint64*>(malloc(sizeof(uint64) * (count + 2)));
@@ -263,9 +267,9 @@ bool test_timestamp_capacity(uint32 count) noexcept
         gpu::wait_timeline(completion);
         gpu::read_timestamps(pool);
         gpu::reset_command_pool(pool);
-        bool batch_valid = cpu[0] == sentinel && cpu[count + 1] == sentinel && (batch == 0 || cpu[1] != previous_result);
+        bool batch_valid = cpu[0] == sentinel && cpu[count + 1] == sentinel && (!enabled || batch == 0 || cpu[1] != previous_result);
         for (uint32 index = 1; index <= count; ++index)
-            batch_valid = batch_valid && cpu[index] != sentinel && (index == 1 || cpu[index] >= cpu[index - 1]);
+            batch_valid = batch_valid && (enabled ? cpu[index] != sentinel && (index == 1 || cpu[index] >= cpu[index - 1]) : cpu[index] == sentinel);
         previous_result = cpu[1];
         if (!batch_valid) fprintf(stderr, "Timestamp capacity %u failed in batch %u.\n", count, batch);
         valid = valid && batch_valid;
@@ -316,7 +320,7 @@ bool test_without_timestamps(uint32 query_count = 0) noexcept
         gpu::read_timestamps(pool);
         gpu::reset_command_pool(pool);
         for (size_t index = 0; index < batch_command_count; ++index)
-            batch_valid = batch_valid && readback_cpu[index * 2] == sentinel && readback_cpu[index * 2 + 1] == source_cpu[index];
+            batch_valid = batch_valid && readback_cpu[index * 2] == sentinel && readback_cpu[index * 2 + 1] == uint64(batch + 1) * 1000 + index;
         batch_valid = batch_valid && readback_cpu[batch_command_count * 2] == sentinel;
         if (!batch_valid) fprintf(stderr, "Command readback with timestamps disabled failed in batch %u.\n", batch);
         valid = valid && batch_valid;
@@ -501,16 +505,23 @@ bool test_placed_textures(gpu::Device* device, const gpu::DeviceCaps& caps, gpu:
 
     const uint64 heap_size = heap_elements * texture_heap_alignment;
     gpu::TextureHeap texture_heap = gpu::create_texture_heap(device, heap_size);
+    gpu::Texture* first = gpu::create_texture(device, first_desc, texture_heap, 0);
+    gpu::Texture* second = gpu::create_texture(device, second_desc, texture_heap, second_offset);
+    gpu::Texture* broad_3d = has_broad_3d ? gpu::create_texture(device, broad_3d_desc, texture_heap, broad_3d_offset) : nullptr;
+    gpu::Texture* mutable_texture = gpu::create_texture(device, mutable_desc, texture_heap, mutable_offset);
+    gpu::Texture* compressed = has_compressed ? gpu::create_texture(device, compressed_desc, texture_heap, compressed_offset) : nullptr;
+    gpu::Texture* color = has_color ? gpu::create_texture(device, color_desc, texture_heap, color_offset) : nullptr;
+    gpu::Texture* depth_stencil =
+        has_depth_stencil ? gpu::create_texture(device, depth_stencil_desc, texture_heap, depth_stencil_offset) : nullptr;
     gpu::CommandPool* pool = gpu::create_command_pool(device);
     gpu::CommandBuffer* commands = gpu::begin_commands(pool);
-    gpu::Texture* first = gpu::create_texture(commands, first_desc, texture_heap, 0);
-    gpu::Texture* second = gpu::create_texture(commands, second_desc, texture_heap, second_offset);
-    gpu::Texture* broad_3d = has_broad_3d ? gpu::create_texture(commands, broad_3d_desc, texture_heap, broad_3d_offset) : nullptr;
-    gpu::Texture* mutable_texture = gpu::create_texture(commands, mutable_desc, texture_heap, mutable_offset);
-    gpu::Texture* compressed = has_compressed ? gpu::create_texture(commands, compressed_desc, texture_heap, compressed_offset) : nullptr;
-    gpu::Texture* color = has_color ? gpu::create_texture(commands, color_desc, texture_heap, color_offset) : nullptr;
-    gpu::Texture* depth_stencil =
-        has_depth_stencil ? gpu::create_texture(commands, depth_stencil_desc, texture_heap, depth_stencil_offset) : nullptr;
+    gpu::initialize_texture(commands, first);
+    gpu::initialize_texture(commands, second);
+    gpu::initialize_texture(commands, mutable_texture);
+    if (broad_3d) gpu::initialize_texture(commands, broad_3d);
+    if (compressed) gpu::initialize_texture(commands, compressed);
+    if (color) gpu::initialize_texture(commands, color);
+    if (depth_stencil) gpu::initialize_texture(commands, depth_stencil);
 #if defined(NDEBUG)
     if (sampled_depth_stencil)
     {

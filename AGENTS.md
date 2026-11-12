@@ -51,7 +51,10 @@
 - Keep each shader source file's CPU-shared declarations in its own matching shared header. Keep shader-specific root data and constants in that header;
   put types used by multiple shader files in a neutral common header.
 - Use shared (CPU/GPU) data headers for structs, enums, and constants. Do not put arbitrary C/C++ code in them behind `#if !defined(__SLANG__)` blocks.
+- NEVER read struct fields or other data from GPU memory on the CPU, including CPU-mapped allocations, except for explicit readback after GPU completion.
+  Prepare, inspect and modify data in cached CPU memory, then write it to GPU memory. Treat upload and descriptor mappings as write-only, including in examples and tests.
 - Always review code for performance issues before considering work complete.
+- Fix the demonstrated root cause of correctness failures. Do not use blanket resource retention, synchronization or other global overhead to silence diagnostics.
 - Line length is 160 characters. Please don't chop expressions to multiple lines if not needed.
 
 # Documentation Guidelines

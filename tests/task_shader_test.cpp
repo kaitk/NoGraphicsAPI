@@ -81,8 +81,9 @@ static bool initialize(Fixture& fixture) noexcept
     fixture.texture_heap = gpu::create_texture_heap(fixture.device, gpu::get_texture_size_align(fixture.device, target_desc).size);
     fixture.pool = gpu::create_command_pool(fixture.device);
     gpu::CommandBuffer* commands = gpu::begin_commands(fixture.pool);
-    fixture.target = gpu::create_texture(commands, target_desc, fixture.texture_heap, 0);
+    fixture.target = gpu::create_texture(fixture.device, target_desc, fixture.texture_heap, 0);
     if (!fixture.target) return false;
+    gpu::initialize_texture(commands, fixture.target);
     fixture.view = gpu::create_render_view(fixture.target);
     if (!fixture.view) return false;
     fixture.completion.semaphore = gpu::create_timeline_semaphore(fixture.device);
@@ -99,10 +100,10 @@ static bool initialize(Fixture& fixture) noexcept
 
 static bool render_case(Fixture& fixture, uint32 count, uint32 visible_mask, uint32 scenario, bool indirect) noexcept
 {
-    TaskTestData& seed = *reinterpret_cast<TaskTestData*>(fixture.seed.range.cpu);
-    memset(&seed, 0, sizeof(seed));
+    TaskTestData seed{};
     for (uint32 id = 0; id < task_test_capacity; ++id) seed.visibility[id] = 1u << (id % 3);
     for (uint32 batch = 0; batch < task_test_batches; ++batch) seed.batch_counts[batch] = ~0u;
+    memcpy(fixture.seed.range.cpu, &seed, sizeof(seed));
     uint32 batches = count ? (count + task_test_batch_size - 1) / task_test_batch_size : 1;
     *reinterpret_cast<gpu::uint32x3*>(fixture.seed.range.cpu + sizeof(TaskTestData)) = {.x = batches, .y = 1, .z = 1};
     memset(fixture.readback.range.cpu, 0xa5, size_t(fixture.readback.range.size));

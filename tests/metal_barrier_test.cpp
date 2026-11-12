@@ -52,7 +52,8 @@ int main(int argc, const char* const* argv)
     gpu::CommandPool* pool = gpu::create_command_pool(device);
     gpu::CommandBuffer* commands = gpu::begin_commands(pool);
     const gpu::TextureHeap heap = gpu::create_texture_heap(device, gpu::get_texture_size_align(device, desc).size);
-    gpu::Texture* color = gpu::create_texture(commands, desc, heap, 0);
+    gpu::Texture* color = gpu::create_texture(device, desc, heap, 0);
+    gpu::initialize_texture(commands, color);
     gpu::RenderView* view = gpu::create_render_view(color);
     gpu::TimelineSemaphore* timeline = gpu::create_timeline_semaphore(device);
     const gpu::GpuHeap upload = gpu::create_gpu_heap(device, 64 + 2 * sizeof(MetalBarrierRoot));
@@ -126,7 +127,7 @@ int main(int argc, const char* const* argv)
         passed &= result[0] == 211 + mode && result[1] == 123 + mode;
         for (uint32 vertex = 0; vertex < 3; ++vertex) passed &= result[2 + vertex] == 71 + mode;
         for (uint32 guard = 320; guard < 384; ++guard) passed &= readback.range.cpu[guard] == 0xa5;
-        if (timestamps)
+        if (timestamps && gpu::get_device_caps(device).timestamp_period_ns != 0)
         {
             const uint64* ticks = reinterpret_cast<const uint64*>(readback.range.cpu + 384);
             passed &= ticks[0] != 0 && ticks[1] >= ticks[0] && ticks[1] != 0xa5a5a5a5a5a5a5a5ull;

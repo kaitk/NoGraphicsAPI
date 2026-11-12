@@ -28,9 +28,9 @@ not suballocate application data or track pointer lifetimes.
 
 Textures and samplers occupy application-selected descriptor indices. Opaque heaps provide indexed
 writes, range copies and binding, without descriptor sets, per-material binding tables or pipeline
-resource signatures. Metal uses a texture-view pool and sampler resource IDs; Vulkan uses native
+resource signatures. Metal requires texture-view pools and uses sampler resource IDs. Vulkan uses native
 `VK_EXT_descriptor_heap` storage. The public contract exposes CPU descriptor operations, not arbitrary
-CPU/GPU descriptor-byte mutation. This retains slot ownership while supporting both representations.
+CPU/GPU descriptor-byte mutation. This retains slot ownership on both backends.
 
 Unlike the post's embedded sampler values, sampler indices refer to a separate application-owned
 heap. Texture views can select compatible formats, mip/layer ranges and aspects. Applications own
@@ -42,9 +42,9 @@ Each draw or dispatch takes a GPU pointer to an application-owned root. Pointer 
 storage, and descriptor fields hold indices. The root and referenced resources survive GPU completion.
 Mapped frame storage and `BumpAllocator::allocate<T>()` provide transient roots without per-command driver allocation.
 
-Roots use shared C layout and row-major matrices. Vulkan pushes their 64-bit address and Metal updates
-its argument table. GPU work can write root contents before later commands consume them. All active
-graphics stages share one root; separate stage roots and GPU-generated binding commands are not exposed.
+Roots use a shared aligned layout and row-major matrices; pointed-to data keeps C POD layout. Vulkan pushes the root address; Metal 4 updates
+its argument table. GPU work can write root contents before
+later commands consume them. All graphics stages share one root; separate stage roots and GPU-generated binding commands are not exposed.
 
 `ShaderStage` contains precompiled bytes, an entry name and compute/task/mesh threadgroup dimensions.
 Vulkan accepts SPIR-V; Metal accepts metallib. Both use the same Slang source and root structures.
@@ -65,9 +65,8 @@ gpu::barrier(commands, gpu::Stage::compute, gpu::Access::shader_write,
 ```
 
 Vulkan emits a global memory barrier and keeps ordinary images in `GENERAL`; optional unified image
-layouts optimize this policy. Initial texture and presentation transitions remain internal. Metal
-maps the same scopes to native stage dependencies. Applications still describe actual hazards and
-use timeline waits between queues.
+layouts optimize this policy. Initial texture and presentation transitions remain internal. Metal 4 maps the same scopes
+to native stage dependencies. Applications describe actual hazards and use timeline waits between queues.
 
 The post's split barriers can signal and wait on tokens at GPU addresses. That interface is not
 exposed: Vulkan has no equivalent command with the proposed configurable atomic/comparison operations.
@@ -78,7 +77,8 @@ control command-pool reset and reuse of upload ranges, descriptors, indirect arg
 placements. Resource destruction is immediate; deferred deletion is an optional utility policy.
 
 Index data, indirect arguments and copies use GPU ranges. Vulkan device-address commands consume
-them directly; Metal resolves backing buffers where native copy operations require handles. Indirect
+them directly when available; otherwise Vulkan resolves backing buffers and offsets. Metal 4 draws and
+dispatches use native address commands, while copies resolve backing buffers through the shared address table. Indirect
 mesh drawing is optional on Metal Apple7/Apple8 and reported by `DeviceCaps::indirect_mesh_draw`.
 GPU draw-count pointers, root arrays and per-stage root strides remain outside the public interface.
 
@@ -88,6 +88,8 @@ Opaque textures retain native creation metadata and views, but placement belongs
 `TextureHeap` is storage, separate from a texture descriptor heap. Vulkan selects one compatible
 GPU-only texture memory type; Metal uses private placement heaps. Placement requirements come from
 `get_texture_size_align`; the utility `TextureAllocator` manages reusable placements.
+Texture creation records no GPU commands. `initialize_texture` initializes metadata before first GPU use
+and after writes through an overlapping texture; applications synchronize storage reuse explicitly.
 
 Textures have no CPU mapping. Upload and readback use GPU address ranges, and their lifetimes follow
 submission timelines. The backend does not track texture-to-heap or texture-to-descriptor dependencies.
@@ -98,8 +100,8 @@ library handles native presentation synchronization and image transitions.
 
 ## Native API requirements and limits
 
-Vulkan requires `VK_EXT_descriptor_heap`, `VK_KHR_shader_untyped_pointers`,
-`VK_KHR_device_address_commands` and `VK_EXT_mesh_shader`, plus the core features documented in
+Vulkan requires `VK_EXT_descriptor_heap`, `VK_KHR_shader_untyped_pointers`
+and `VK_EXT_mesh_shader`, plus the core features documented in
 [Vulkan support](vulkan-support.md). Descriptor-heap pipelines use no `VkDescriptorSetLayout`,
 `VkDescriptorPool`, `VkDescriptorSet` or `VkPipelineLayout`.
 

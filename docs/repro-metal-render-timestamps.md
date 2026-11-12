@@ -3,6 +3,10 @@
 On Apple M3 Max, macOS 26.6.2 (25G83), Xcode 27.0 (27A266a), native render-encoder timestamps leave
 some entries unwritten after GPU completion. The failure reproduces with and without API validation.
 This points to a Metal driver/runtime issue; the root cause is not vendor-confirmed.
+The same native failure reproduces on Apple A18 Pro, macOS 27.0.1 (26A434), Xcode 27.1 on 17 October 2026:
+interleaved draws write 5 of 10 entries; grouped before/after markers write 4 of 10. Both API-validation modes fail,
+including a blended 1080p workload. Relaxed granularity and spaced counter indices also leave entries unwritten.
+Command-buffer markers remain valid. No replacement or skipped correctness check is applied.
 
 The [standalone source](../tests/repro_metal_render_timestamps.mm) uses native Metal and inline MSL,
 without NoGraphicsAPI calls or Slang. Its target is excluded from normal builds and CTest.

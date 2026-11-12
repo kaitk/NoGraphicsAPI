@@ -140,8 +140,9 @@ void churn_heaps(void* argument) noexcept
         gpu::wait_timeline(completion);
         for (uint32 i = 0; i < churn_batch_size; ++i)
         {
-            worker.valid = memcmp(worker.upload.range.cpu + i * churn_heap_bytes,
-                worker.readback.range.cpu + 64 + i * churn_heap_bytes, heaps[i].range.size) == 0 && worker.valid;
+            const uint32* values = reinterpret_cast<const uint32*>(worker.readback.range.cpu + 64 + i * churn_heap_bytes);
+            for (uint32 word = 0; word < heaps[i].range.size / sizeof(uint32); ++word)
+                worker.valid = values[word] == ((worker.queue << 28) | (iteration << 13) | (i * churn_heap_bytes / 4 + word)) && worker.valid;
             for (uint64 guard = heaps[i].range.size; guard < churn_heap_bytes; ++guard)
                 worker.valid = worker.readback.range.cpu[64 + i * churn_heap_bytes + guard] == 0xcd && worker.valid;
         }
@@ -180,13 +181,15 @@ void copy_stable_heaps(void* argument) noexcept
         const gpu::TimelinePoint completion{.semaphore = timeline, .value = ++worker.iterations};
         gpu::submit(worker.device, {.commands = {commands}, .completion = completion}, worker.queue);
         gpu::wait_timeline(completion);
-        worker.valid = memcmp(worker.upload.range.cpu, worker.readback.range.cpu, copy_bytes) == 0 && worker.valid;
+        for (uint32 word = 0; word < copy_bytes / 4; ++word)
+            worker.valid = reinterpret_cast<const uint32*>(worker.readback.range.cpu)[word] == 0x98760000u + worker.queue * 0x1000u + word
+                && worker.valid;
         for (uint32 i = 0; i < (copy_readback_bytes - copy_bytes) / 4; ++i)
         {
             uint32 expected = 0xcdcdcdcdu;
-            if (i < 16 && i % 4 == 1) expected = *reinterpret_cast<const uint32*>(worker.upload.range.cpu + offsets[i / 4]);
+            if (i < 16 && i % 4 == 1) expected = 0x98760000u + worker.queue * 0x1000u + uint32(offsets[i / 4] / 4);
             if (i == (copy_readback_bytes - copy_bytes) / 4 - 1)
-                expected = *reinterpret_cast<const uint32*>(worker.upload.range.cpu + copy_bytes - 4);
+                expected = 0x98760000u + worker.queue * 0x1000u + copy_bytes / 4 - 1;
             worker.valid = reinterpret_cast<const uint32*>(worker.readback.range.cpu + copy_bytes)[i] == expected && worker.valid;
         }
         gpu::reset_command_pool(pool);
@@ -289,11 +292,12 @@ void churn_timestamp_contexts(void* argument) noexcept
             const uint64* values = reinterpret_cast<const uint64*>(readback.range.cpu + context * timestamp_stride);
             bool valid = values[0] == ~uint64{0} && values[timestamp_queries + 2] == ~uint64{0} &&
                 uint32(values[timestamp_queries + 1] >> 32) == ~uint32{0} &&
-                uint32(values[timestamp_queries + 1]) == reinterpret_cast<const uint32*>(upload.range.cpu)[context];
+                uint32(values[timestamp_queries + 1]) == (worker.queue + 1) * 10000 + iteration * 100 + context;
             for (uint32 index = 0; index < timestamp_queries; ++index)
             {
-                valid = values[index + 1] > previous[context][index] && values[index + 1] != ~uint64{0} &&
-                    (!index || values[index + 1] >= values[index]) && valid;
+                valid = (gpu::get_device_caps(worker.device).timestamp_period_ns != 0
+                    ? values[index + 1] > previous[context][index] && values[index + 1] != ~uint64{0} &&
+                      (!index || values[index + 1] >= values[index]) : values[index + 1] == ~uint64{0}) && valid;
                 previous[context][index] = values[index + 1];
             }
             if (!valid) fprintf(stderr, "Timestamp slot collision or reuse failed on queue %u, iteration %u, context %u.\n",
@@ -358,7 +362,10 @@ void update_descriptors(void* argument) noexcept
         if (iteration == 0)
         {
             for (uint32 i = 0; i < 4; ++i)
-                textures[i] = gpu::create_texture(commands, texture_desc, *worker.heap, (worker.queue * 4 + i) * worker.texture_stride);
+            {
+                textures[i] = gpu::create_texture(worker.device, texture_desc, *worker.heap, (worker.queue * 4 + i) * worker.texture_stride);
+                gpu::initialize_texture(commands, textures[i]);
+            }
             for (uint32 i = 0; i < 2; ++i)
                 gpu::copy_memory_to_texture(commands, {.gpu = upload.range.gpu + i * texture_bytes, .size = texture_bytes}, textures[i]);
         }
@@ -385,12 +392,14 @@ void update_descriptors(void* argument) noexcept
         const gpu::TimelinePoint completion{.semaphore = timeline, .value = iteration + 1};
         gpu::submit(worker.device, {.commands = {commands}, .completion = completion}, worker.queue);
         gpu::wait_timeline(completion);
-        const uint32* input = reinterpret_cast<const uint32*>(upload.range.cpu + source * texture_bytes);
         const uint32* output = reinterpret_cast<const uint32*>(readback.range.cpu);
         const uint32* pixels = reinterpret_cast<const uint32*>(readback.range.cpu + texture_bytes + 16);
         for (uint32 i = 0; i < texture_bytes / 4; ++i)
-            worker.valid = output[i] == input[i] * 3u + 7u &&
-                           pixels[i] == ((input[i] & 0xff00ff00u) | (input[i] >> 16 & 0xffu) | (input[i] & 0xffu) << 16) && worker.valid;
+        {
+            const uint32 input = 0xff000000u | ((worker.queue + 1) << 16) | ((source * texture_bytes / 4 + i) * 31u & 0xffffu);
+            worker.valid = output[i] == input * 3u + 7u &&
+                           pixels[i] == ((input & 0xff00ff00u) | (input >> 16 & 0xffu) | (input & 0xffu) << 16) && worker.valid;
+        }
         for (uint32 i = 0; i < 16; ++i)
             worker.valid = readback.range.cpu[texture_bytes + i] == 0xcd && readback.range.cpu[texture_bytes * 2 + 16 + i] == 0xcd && worker.valid;
         gpu::reset_command_pool(pool);

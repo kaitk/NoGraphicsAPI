@@ -28,10 +28,10 @@ int main(int argc, char** argv)
     gpu::CommandPool* pool = gpu::create_command_pool(device);
     gpu::CommandPool* external_pool = gpu::create_command_pool(device);
     gpu::TimelineSemaphore* timeline = gpu::create_timeline_semaphore(device);
-    const gpu::GpuHeap cpu_roots = gpu::create_gpu_heap(device, 3 * sizeof(RootData) + sizeof(RootDataGenerate));
+    const gpu::GpuHeap cpu_roots = gpu::create_gpu_heap(device, 3 * sizeof(RootData) + 2 * sizeof(RootDataGenerate));
     gpu::BumpAllocator arena(cpu_roots.range);
     const gpu::GpuHeap roots = gpu::create_gpu_heap(device, 2 * sizeof(RootData) + 16, gpu::MemoryType::gpu_only);
-    const gpu::GpuHeap output = gpu::create_gpu_heap(device, 5 * 64 * sizeof(uint32), gpu::MemoryType::gpu_only);
+    const gpu::GpuHeap output = gpu::create_gpu_heap(device, 6 * 64 * sizeof(uint32), gpu::MemoryType::gpu_only);
     const gpu::GpuHeap readback = gpu::create_gpu_heap(device, output.range.size, gpu::MemoryType::readback);
     bool valid = true;
     for (uint32 round = 0; round < 4; ++round)
@@ -53,9 +53,10 @@ int main(int argc, char** argv)
         memset(&root, 0, sizeof(root));
         gpu::bind_pso(second, generate);
         const gpu::GpuCpuRange<RootDataGenerate> generated = arena.allocate_atomic<RootDataGenerate>();
-        *generated.cpu = {.destination = reinterpret_cast<RootData*>(roots.range.gpu),
+        RootDataGenerate generated_value{.destination = reinterpret_cast<RootData*>(roots.range.gpu),
             .output = reinterpret_cast<uint32*>(output.range.gpu),
             .dispatch_arguments = reinterpret_cast<uint32*>(roots.range.gpu + 2 * sizeof(RootData)), .first_index = 3, .seed = round * 100 + 3};
+        *generated.cpu = generated_value;
         gpu::dispatch(second, generated.gpu, {.x = 2, .y = 1, .z = 1});
         gpu::end_commands(first);
         gpu::end_commands(second);
@@ -65,6 +66,17 @@ int main(int argc, char** argv)
         gpu::bind_pso(third, consume);
         gpu::dispatch(third, roots.range.gpu, {.x = 1, .y = 1, .z = 1});
         gpu::dispatch_indirect(third, roots.range.gpu + sizeof(RootData), {.gpu = roots.range.gpu + 2 * sizeof(RootData), .size = 12});
+        gpu::barrier(third, gpu::Stage::compute | gpu::Stage::indirect, gpu::Access::shader_read | gpu::Access::indirect_read,
+            gpu::Stage::compute, gpu::Access::shader_write);
+        const gpu::GpuCpuRange<RootDataGenerate> rewritten = arena.allocate<RootDataGenerate>();
+        generated_value.first_index = 5;
+        generated_value.seed = round * 100 + 5;
+        *rewritten.cpu = generated_value;
+        gpu::bind_pso(third, generate);
+        gpu::dispatch(third, rewritten.gpu, {.x = 1, .y = 1, .z = 1});
+        gpu::barrier(third, gpu::Stage::compute, gpu::Access::shader_write, gpu::Stage::compute, gpu::Access::shader_read);
+        gpu::bind_pso(third, consume);
+        gpu::dispatch(third, roots.range.gpu, {.x = 1, .y = 1, .z = 1});
         gpu::barrier(third, gpu::Stage::compute, gpu::Access::shader_write, gpu::Stage::transfer, gpu::Access::transfer_read);
         gpu::copy_memory(third, gpu::gpu_range(output), gpu::gpu_range(readback));
         gpu::barrier(third, gpu::Stage::transfer, gpu::Access::transfer_write, gpu::Stage::host, gpu::Access::host_read);
@@ -72,7 +84,7 @@ int main(int argc, char** argv)
         gpu::submit(device, {.commands = {first, second, third}, .completion = {.semaphore = timeline, .value = round + 1}});
         gpu::wait_timeline({.semaphore = timeline, .value = round + 1});
         const uint32* actual = reinterpret_cast<const uint32*>(readback.range.cpu);
-        for (uint32 i = 0; i < 5; ++i)
+        for (uint32 i = 0; i < 6; ++i)
             for (uint32 lane = 0; lane < 64; ++lane)
             {
                 const uint32 seed = round * 100 + i;

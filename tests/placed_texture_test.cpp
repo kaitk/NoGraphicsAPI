@@ -57,35 +57,29 @@ int main()
     const uint64 heap_size = (size_align.size + element_size - 1) / element_size * element_size;
     gpu::TextureHeap texture_heap = gpu::create_texture_heap(device, heap_size);
     gpu::TextureAllocator allocator(device, texture_heap, 1);
-    gpu::CommandPool* pool = gpu::create_command_pool(device);
-    gpu::CommandBuffer* commands = gpu::begin_commands(pool);
-
-    gpu::PlacedTexture texture = allocator.allocate(commands, desc);
-    gpu::PlacedTexture exhausted = allocator.allocate(commands, desc);
-    gpu::end_commands(commands);
-    gpu::reset_command_pool(pool);
+    gpu::PlacedTexture texture = allocator.allocate(desc);
+    gpu::PlacedTexture exhausted = allocator.allocate(desc);
     if (!texture.texture || exhausted.texture)
     {
         allocator.free(exhausted);
         allocator.free(texture);
-        gpu::destroy_command_pool(pool);
         gpu::destroy_texture_heap(texture_heap);
         gpu::destroy_device(device);
         return 1;
     }
 
     allocator.free(texture);
-    commands = gpu::begin_commands(pool);
-    texture = allocator.allocate(commands, desc);
+    texture = allocator.allocate(desc);
     if (!texture.texture)
     {
-        gpu::end_commands(commands);
-        gpu::destroy_command_pool(pool);
         gpu::destroy_texture_heap(texture_heap);
         gpu::destroy_device(device);
         return 1;
     }
 
+    gpu::CommandPool* pool = gpu::create_command_pool(device);
+    gpu::CommandBuffer* commands = gpu::begin_commands(pool);
+    gpu::initialize_texture(commands, texture.texture);
     gpu::TimelineSemaphore* timeline = gpu::create_timeline_semaphore(device);
     bool valid = true;
     uint32 callback_count = 0;
@@ -95,7 +89,7 @@ int main()
         delete_queue.defer(~uint64{0}, DeferredCount{.count = &callback_count});
 
         delete_queue.tick();
-        exhausted = allocator.allocate(commands, desc);
+        exhausted = allocator.allocate(desc);
         if (exhausted.texture)
             valid = false;
 
@@ -104,19 +98,17 @@ int main()
         gpu::wait_timeline({.semaphore = timeline, .value = 1});
         gpu::reset_command_pool(pool);
         allocator.free(exhausted);
-        commands = gpu::begin_commands(pool);
-        exhausted = allocator.allocate(commands, desc);
+        exhausted = allocator.allocate(desc);
         if (exhausted.texture)
             valid = false;
-        gpu::end_commands(commands);
-        gpu::reset_command_pool(pool);
         allocator.free(exhausted);
-        commands = gpu::begin_commands(pool);
 
         delete_queue.tick();
-        texture = allocator.allocate(commands, desc);
+        texture = allocator.allocate(desc);
         valid &= texture.texture != nullptr && callback_count == 0;
 
+        commands = gpu::begin_commands(pool);
+        if (texture.texture) gpu::initialize_texture(commands, texture.texture);
         gpu::end_commands(commands);
         gpu::submit(device, {.commands = {commands}, .completion = {.semaphore = timeline, .value = 2}}, 0);
         gpu::wait_idle(device);

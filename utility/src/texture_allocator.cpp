@@ -11,14 +11,14 @@ TextureAllocator::TextureAllocator(Device* device, const TextureHeap& heap, uint
     assert(heap.owner);
 }
 
-PlacedTexture TextureAllocator::allocate(CommandBuffer* commands, const TextureDesc& desc) noexcept
+PlacedTexture TextureAllocator::allocate(const TextureDesc& desc) noexcept
 {
     const SizeAlign requirements = get_texture_size_align(device_, desc);
     if (!requirements.size) return {};
     const HeapAllocator::Range range = ranges_.allocate(requirements.size);
     if (range.offset == HeapAllocator::unused_node)
         return {};
-    Texture* texture = create_texture(commands, desc, heap_, uint64{range.offset} * ranges_.element_size);
+    Texture* texture = create_texture(device_, desc, heap_, uint64{range.offset} * ranges_.element_size);
     if (!texture)
     {
         ranges_.free(range.token);

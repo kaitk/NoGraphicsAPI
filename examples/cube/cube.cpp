@@ -113,10 +113,10 @@ int main() {
     const GpuCpuRange<byte> frame_ranges[2]{data_allocator.allocate(4096), data_allocator.allocate(4096)};
     const GpuCpuRange<CubeVertex> vertex_allocation = data_allocator.allocate<CubeVertex>(cube_vertex_count);
     const GpuCpuRange<uint16> index_allocation = data_allocator.allocate<uint16>(cube_index_count);
-    const GpuCpuRange<byte> upload_allocation = data_allocator.allocate(texture_byte_count);
+    byte* texture_bytes = new byte[texture_byte_count];
     memcpy(vertex_allocation.cpu, cube_vertices, sizeof(cube_vertices));
 	memcpy(index_allocation.cpu, cube_indices, sizeof(cube_indices));
-    read_binary_file(NOGRAPHICSAPI_CUBE_TEXTURE_PATH, Span<byte>(upload_allocation.cpu, texture_byte_count));
+    read_binary_file(NOGRAPHICSAPI_CUBE_TEXTURE_PATH, Span<byte>(texture_bytes, texture_byte_count));
 
 	UploadQueue uploads(device, texture_byte_count);
 	TextureDescriptorHeap* texture_descriptor_heap = create_texture_descriptor_heap(device, 1);
@@ -129,12 +129,13 @@ int main() {
 	CommandBuffer* texture_commands = begin_commands(command_pools[0]);
 
 	// Textures
-	PlacedTexture texture = texture_allocator.allocate(texture_commands, {
+	PlacedTexture texture = texture_allocator.allocate({
 		.extent = {.x = texture_width, .y = texture_height, .z = 1},
 		.format = Format::rgba8_srgb,
 		.usage = TextureUsage::sampled | TextureUsage::transfer_destination,
 	});
 
+	initialize_texture(texture_commands, texture.texture);
 	write_texture_descriptor(texture_descriptor_heap, 0, texture.texture, TextureDescriptorType::sampled);
 	write_sampler_descriptor(sampler_descriptor_heap, 0, {
 		.min_filter = Filter::nearest,
@@ -145,7 +146,8 @@ int main() {
 	end_commands(texture_commands);
 	latest_completion.value++;
 	submit(device, {.commands = {texture_commands}, .completion = latest_completion});
-    uploads.upload_texture(texture.texture, {upload_allocation.cpu, texture_byte_count});
+    uploads.upload_texture(texture.texture, {texture_bytes, texture_byte_count});
+    delete[] texture_bytes;
     uploads.wait();
     uploads.destroy();
 
@@ -174,11 +176,12 @@ int main() {
 				wait_timeline(latest_completion);
 			destroy_render_view(depth_render_view);
 			texture_allocator.free(depth);
-			depth = texture_allocator.allocate(commands, {
+			depth = texture_allocator.allocate({
 				.extent = {.x = frame.extent.x, .y = frame.extent.y, .z = 1},
 				.format = Format::d32_float,
 				.usage = TextureUsage::depth_stencil_attachment,
 			});
+			initialize_texture(commands, depth.texture);
 			depth_render_view = create_render_view(depth.texture);
 			depth_extent = frame.extent;
 		}

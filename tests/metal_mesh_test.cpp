@@ -35,7 +35,8 @@ int main(int argc, const char* const* argv)
     gpu::CommandPool* pool = gpu::create_command_pool(device);
     gpu::CommandBuffer* commands = gpu::begin_commands(pool);
     const gpu::TextureHeap heap = gpu::create_texture_heap(device, gpu::get_texture_size_align(device, desc).size);
-    gpu::Texture* color = gpu::create_texture(commands, desc, heap, 0);
+    gpu::Texture* color = gpu::create_texture(device, desc, heap, 0);
+    gpu::initialize_texture(commands, color);
     gpu::RenderView* view = gpu::create_render_view(color);
     const gpu::GpuHeap upload = gpu::create_gpu_heap(device, 64);
     const gpu::GpuHeap arguments = gpu::create_gpu_heap(device, 32, gpu::MemoryType::gpu_only);

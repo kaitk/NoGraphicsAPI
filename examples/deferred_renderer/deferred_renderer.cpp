@@ -62,16 +62,16 @@ void recreate_gbuffer(CommandBuffer* commands, TextureAllocator& texture_allocat
                      uint32 width, uint32 height) noexcept
 {
     gbuffer = {
-        .albedo = texture_allocator.allocate(commands, {
+        .albedo = texture_allocator.allocate({
             .extent = {.x = width, .y = height, .z = 1},
             .usage = TextureUsage::sampled | TextureUsage::color_attachment,
         }),
-        .normal_roughness = texture_allocator.allocate(commands, {
+        .normal_roughness = texture_allocator.allocate({
             .extent = {.x = width, .y = height, .z = 1},
             .format = Format::rgba16_float,
             .usage = TextureUsage::sampled | TextureUsage::color_attachment,
         }),
-        .depth = texture_allocator.allocate(commands, {
+        .depth = texture_allocator.allocate({
             .extent = {.x = width, .y = height, .z = 1},
             .format = Format::d32_float,
             .usage = TextureUsage::sampled | TextureUsage::depth_stencil_attachment,
@@ -80,6 +80,9 @@ void recreate_gbuffer(CommandBuffer* commands, TextureAllocator& texture_allocat
         .height = height,
     };
 
+    initialize_texture(commands, gbuffer.albedo.texture);
+    initialize_texture(commands, gbuffer.normal_roughness.texture);
+    initialize_texture(commands, gbuffer.depth.texture);
     gbuffer.albedo_render_view = create_render_view(gbuffer.albedo.texture);
     gbuffer.normal_roughness_render_view = create_render_view(gbuffer.normal_roughness.texture);
     gbuffer.depth_render_view = create_render_view(gbuffer.depth.texture);

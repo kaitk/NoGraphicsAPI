@@ -58,8 +58,10 @@ static bool initialize(Fixture& fixture) noexcept
     const uint64 second_offset = (placement.size + placement.align - 1) / placement.align * placement.align;
     fixture.texture_heap = create_texture_heap(fixture.device, second_offset + placement.size);
     CommandBuffer* commands = begin_commands(fixture.pools[0]);
-    fixture.textures[0] = create_texture(commands, description, fixture.texture_heap, 0);
-    fixture.textures[1] = create_texture(commands, description, fixture.texture_heap, second_offset);
+    fixture.textures[0] = create_texture(fixture.device, description, fixture.texture_heap, 0);
+    fixture.textures[1] = create_texture(fixture.device, description, fixture.texture_heap, second_offset);
+    initialize_texture(commands, fixture.textures[0]);
+    initialize_texture(commands, fixture.textures[1]);
     fixture.target = create_render_view(fixture.textures[1]);
     write_texture_descriptor(fixture.descriptors, 0, fixture.textures[0], TextureDescriptorType::sampled);
     write_texture_descriptor(fixture.descriptors, 1,
@@ -157,17 +159,18 @@ static bool run_case(Fixture& fixture, uint32 iteration) noexcept
     for (uint32 index = 0; index < data_bytes / 4; ++index)
     {
         valid = reinterpret_cast<const uint32*>(fixture.readback.range.cpu)[index] == (iteration * 1000 + index) * 3 + 7 && valid;
-        const uint8* input = fixture.upload.range.cpu + slot_bytes + index * 4;
         const uint8* pixel = fixture.readback.range.cpu + slot_bytes + index * 4;
-        valid = pixel[0] == input[2] && pixel[1] == input[1] && pixel[2] == input[0] && pixel[3] == input[3] && valid;
+        valid = pixel[0] == uint8(index * 7 + iteration) && pixel[1] == uint8(index * 3 + iteration)
+            && pixel[2] == uint8(index + iteration) && pixel[3] == 255 && valid;
         const uint8* cleared = fixture.readback.range.cpu + 2 * slot_bytes + index * 4;
         valid = cleared[0] == 255 && cleared[1] == 0 && cleared[2] == 0 && cleared[3] == 255 && valid;
     }
     const uint64* timestamps = reinterpret_cast<const uint64*>(fixture.readback.range.cpu + timestamp_offset);
     for (uint32 index = 0; index < 8; index += 2)
     {
-        valid = timestamps[index] != 0xa5a5a5a5a5a5a5a5ull && timestamps[index + 1] != 0xa5a5a5a5a5a5a5a5ull &&
-                timestamps[index + 1] >= timestamps[index] && valid;
+        valid = valid && (get_device_caps(fixture.device).timestamp_period_ns != 0
+            ? timestamps[index] != 0xa5a5a5a5a5a5a5a5ull && timestamps[index + 1] != 0xa5a5a5a5a5a5a5a5ull && timestamps[index + 1] >= timestamps[index]
+            : timestamps[index] == 0xa5a5a5a5a5a5a5a5ull && timestamps[index + 1] == 0xa5a5a5a5a5a5a5a5ull);
     }
     for (uint64 index = 0; index < fixture.readback.range.size; ++index)
     {

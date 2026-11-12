@@ -1,6 +1,6 @@
 # Shared Slang shader contract
 
-NoGraphicsAPI shaders share C-compatible root structures, real 64-bit GPU pointers, and separate
+NoGraphicsAPI shaders share aligned root structures, real 64-bit GPU pointers, and separate
 texture/sampler index namespaces across Vulkan and Metal 4. Include
 `<NoGraphicsAPI/shader.slang>` for the target ABI and
 `<NoGraphicsAPIUtility/shader_types.h>` in CPU/GPU shared data headers.
@@ -51,30 +51,38 @@ additional pointers inside the root can be selected by GPU work.
 | Target | Root | Texture namespace | Sampler namespace |
 | --- | --- | --- | --- |
 | Vulkan | Uniform buffer at binding 0, mapped to the 64-bit address in push data | Native resource descriptor heap | Native sampler descriptor heap |
-| Metal | `StructuredBuffer<T>` at buffer 0, preserving C layout | One 64-bit pool base at buffer 1 | Typed sampler entries at buffer 2 |
+| Metal | `ConstantBuffer<T>` at buffer 0 in the `constant` address space | 64-bit texture-pool base at buffer 1 | Typed sampler entries at buffer 2 |
 
-`GPU_ROOT` preserves the shared C++ layout, including vectors, matrices and pointers, without adding
-backend fields. Plain Metal `ConstantBuffer<Type>` can use different alignment.
+Metal 4 selects textures using `baseResourceID + index`.
 
-The optional third argument declares the root address alignment in bytes; it defaults to four:
+Roots share a constant-buffer layout on both targets:
+
+- Align the GPU address and total byte size to 16 bytes.
+- Align 32-bit two-component vectors to eight bytes and four-component vectors to 16 bytes.
+  Scalars and pointers use their natural alignment. Add explicit padding to the shared C++/Slang declaration.
+- Use `float4`/`uint4` instead of three-component root vectors. Inline row-major matrices have four columns
+  (`float3x4` or `float4x4`). Arrays use the native element stride, including four bytes for `uint32` arrays.
+- Embedded structs follow the same rules. Reference ordinary packed data through pointers instead.
+
+This contract applies only to roots. Pointed-to data keeps C POD layout, including packed `float3`,
+`float3x3`, and arrays; pointers inside a Metal constant root still address ordinary `device` storage.
+Root contents must remain unchanged during their shader use. GPU writes before the next use are supported
+with the barriers described above, including rewriting the same root address between dispatches.
+
+The optional third argument declares the root address alignment in bytes; it defaults to 16:
 
 ```slang
 GPU_ROOT(ExampleRoot, root, 16);
 ```
 
-Use a power of two at least four and satisfy both that promise and the type's natural alignment.
-This does not change field offsets or allocate memory. The draw/dispatch API still requires a
-16-byte-aligned root address, so its callers can specify 16 explicitly.
+Use a power of two at least four, satisfying the API's 16-byte address requirement and the type's alignment.
+Metal applies `__builtin_assume` to the constant pointer. Vulkan's uniform-buffer binding is unchanged.
+Neither backend allocates or copies root storage; all stages consume the application's GPU address directly.
 
-Vulkan uses a uniform-buffer binding; the alignment argument does not change its code generation.
-
-Metal keeps an ordinary typed load for the two-argument default; explicit alignment hints use
-`__builtin_assume` on the generated packed storage pointer.
-The root remains in the `device` address space. `constant` can enable uniform-register preloading,
-but Slang's `ConstantBuffer` lowering currently changes the shared vector/matrix layout, including
-when `ScalarDataLayout` is requested. The alignment hint preserves that layout; it does not request
-constant-address-space access or guarantee vector loads. Source generation is checked with Slang
-2026.18.2; native root-data and ABI tests pass on M3 Max. No Metal performance gain is claimed.
+On macOS, `tools/check_root_layouts.py` scans `GPU_ROOT` declarations and checks every field, nested field,
+and array stride using compiled C++, SPIR-V reflection, and native Metal compiler assertions. Pass shader/header
+directories, `--include` paths, `--slang /path/to/slangc`, and `--output build/root-layouts`. Use this after editing roots;
+16-byte total size alone cannot detect incompatible field offsets.
 
 Recompile Vulkan shaders when adopting this ABI: the push payload is now eight bytes, not the root
 structure itself. The binding uses `VK_DESCRIPTOR_MAPPING_SOURCE_PUSH_ADDRESS_EXT`; no buffer descriptor is allocated.
@@ -91,8 +99,9 @@ This applies to default and explicit viewports; shaders need no Y-flip helper or
 
 ## Build and stage artifacts
 
-Vulkan requires Slang 2026.14.1+ and SPIRV-Tools 2026.3+. Metal is verified with stock Slang 2026.18.2,
-Xcode's Metal 4 compiler, and macOS/iOS 26+. No Slang fork or generated-source rewriting is required.
+Vulkan requires Slang 2026.14.1+ and SPIRV-Tools 2026.3+. Metal requires stock Slang 2026.18.2+ and
+Xcode 26+; compile Metal 4.0 metallibs for macOS or iOS 26+.
+No Slang fork or generated-source rewriting is required.
 Both targets use `-matrix-layout-row-major`; Vulkan additionally requires `-fvk-use-c-layout`.
 
 ```sh
@@ -103,12 +112,12 @@ spirv-val --target-env vulkan1.4 --scalar-block-layout shader.comp.spv
 
 slangc shader.slang -target metal -DNOGRAPHICSAPI_METAL -matrix-layout-row-major \
   -entry computeMain -stage compute -o shader.comp.metal
-xcrun -sdk macosx metal -std=metal4.0 -c shader.comp.metal -o shader.comp.air
+xcrun -sdk macosx metal -std=metal4.0 -target air64-apple-macos26.0 -c shader.comp.metal -o shader.comp.air
 xcrun -sdk macosx metallib shader.comp.air -o shader.comp.metallib
 ```
 
-For iOS 26 device libraries, use `-sdk iphoneos` in both Xcode commands and add
-`-target air64-apple-ios26.0` to the `metal` command. Shared sources and shader metadata stay the same;
+For iOS 26+ device libraries, use `-sdk iphoneos` in both Xcode commands and replace the target with
+`-target air64-apple-ios26.0`. Shared sources and shader metadata stay the same;
 the resulting metallib is specific to its target platform.
 
 Task and mesh Vulkan stages also require `spvMeshShadingEXT`. Entry names are preserved on both

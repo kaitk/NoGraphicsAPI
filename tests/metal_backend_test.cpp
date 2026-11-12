@@ -42,9 +42,12 @@ bool test_heaps_and_roots(gpu::Device* device, gpu::TimelineSemaphore* timeline)
     gpu::CommandPool* pool = gpu::create_command_pool(device);
     gpu::CommandBuffer* commands = gpu::begin_commands(pool);
     const gpu::TextureHeap heap = gpu::create_texture_heap(device, storage_offset + storage_stride + storage_size.size);
-    gpu::Texture* sampled = gpu::create_texture(commands, sampled_desc, heap, 0);
-    gpu::Texture* storage = gpu::create_texture(commands, storage_desc, heap, storage_offset);
-    gpu::Texture* second_storage = gpu::create_texture(commands, storage_desc, heap, storage_offset + storage_stride);
+    gpu::Texture* sampled = gpu::create_texture(device, sampled_desc, heap, 0);
+    gpu::Texture* storage = gpu::create_texture(device, storage_desc, heap, storage_offset);
+    gpu::Texture* second_storage = gpu::create_texture(device, storage_desc, heap, storage_offset + storage_stride);
+    gpu::initialize_texture(commands, sampled);
+    gpu::initialize_texture(commands, storage);
+    gpu::initialize_texture(commands, second_storage);
     gpu::TextureDescriptorHeap* source_views = gpu::create_texture_descriptor_heap(device, 4);
     gpu::TextureDescriptorHeap* views = gpu::create_texture_descriptor_heap(device, 32);
     gpu::SamplerDescriptorHeap* source_samplers = gpu::create_sampler_descriptor_heap(device, 4);
@@ -115,24 +118,42 @@ bool test_heaps_and_roots(gpu::Device* device, gpu::TimelineSemaphore* timeline)
 
 bool test_draws(gpu::Device* device, gpu::TimelineSemaphore* timeline)
 {
-    const gpu::TextureDesc desc{
+    gpu::TextureDesc desc{
         .extent = {.x = 8, .y = 8, .z = 1},
         .usage = gpu::TextureUsage::color_attachment | gpu::TextureUsage::transfer_source,
     };
     const gpu::Span<byte> code = load_test_shader(NOGRAPHICSAPI_METAL_DRAW_SHADER);
     if (!code.data) return false;
-    gpu::PSO* pso = gpu::create_graphics_pso(device, {
-        .vertex = {.code = {code.data, code.size}, .entry_point = "vertexMain"},
-        .fragment = {.code = {code.data, code.size}, .entry_point = "fragmentMain"},
-        .color_targets = {{.format = gpu::Format::rgba8_unorm}},
-    });
+    gpu::PSO* pipelines[2]{};
+    gpu::TextureHeap heaps[2]{};
+    gpu::Texture* colors[2]{};
+    gpu::RenderView* views[2]{};
+    for (uint32 i = 0; i < 2; ++i)
+    {
+        desc.format = i ? gpu::Format::bgra8_srgb : gpu::Format::rgba8_unorm;
+        pipelines[i] = gpu::create_graphics_pso(device, {
+            .vertex = {.code = {code.data, code.size}, .entry_point = "vertexMain"},
+            .fragment = {.code = {code.data, code.size}, .entry_point = "fragmentMain"},
+            .color_targets = {{.format = desc.format}},
+        });
+        if (!pipelines[i])
+        {
+            for (gpu::PSO* pipeline : pipelines) gpu::destroy_pso(pipeline);
+            free(code.data);
+            return false;
+        }
+    }
     free(code.data);
-    if (!pso) return false;
     gpu::CommandPool* pool = gpu::create_command_pool(device);
     gpu::CommandBuffer* commands = gpu::begin_commands(pool);
-    const gpu::TextureHeap heap = gpu::create_texture_heap(device, gpu::get_texture_size_align(device, desc).size);
-    gpu::Texture* color = gpu::create_texture(commands, desc, heap, 0);
-    gpu::RenderView* view = gpu::create_render_view(color);
+    for (uint32 i = 0; i < 2; ++i)
+    {
+        desc.format = i ? gpu::Format::bgra8_srgb : gpu::Format::rgba8_unorm;
+        heaps[i] = gpu::create_texture_heap(device, gpu::get_texture_size_align(device, desc).size);
+        colors[i] = gpu::create_texture(device, desc, heaps[i], 0);
+        gpu::initialize_texture(commands, colors[i]);
+        views[i] = gpu::create_render_view(colors[i]);
+    }
     const gpu::GpuHeap arguments = gpu::create_gpu_heap(device, 256);
     const gpu::GpuHeap readback = gpu::create_gpu_heap(device, 1024, gpu::MemoryType::readback);
     const uint32 indices[3]{0, 1, 2};
@@ -144,8 +165,9 @@ bool test_draws(gpu::Device* device, gpu::TimelineSemaphore* timeline)
     const gpu::GpuRange index_range{.gpu = arguments.range.gpu, .size = sizeof(indices)};
     for (uint32 mode = 0; mode != 4; ++mode)
     {
-        gpu::begin_render_pass(commands, {.colors = {{.render_view = view, .load = gpu::LoadOp::clear}}});
-        gpu::bind_pso(commands, pso);
+        const uint32 format = mode == 1 || mode == 2 ? 1 : 0;
+        gpu::begin_render_pass(commands, {.colors = {{.render_view = views[format], .load = gpu::LoadOp::clear}}});
+        gpu::bind_pso(commands, pipelines[format]);
         gpu::ClearColor root{.x = 1.0f, .y = 0.0f, .z = 0.0f, .w = 1.0f};
         memcpy(arguments.range.cpu + 192 + mode * sizeof(root), &root, sizeof(root));
         switch (mode)
@@ -160,23 +182,31 @@ bool test_draws(gpu::Device* device, gpu::TimelineSemaphore* timeline)
         memset(&root, 0, sizeof(root));
         gpu::end_render_pass(commands);
         gpu::barrier(commands, gpu::Stage::color_output, gpu::Access::color_write, gpu::Stage::transfer, gpu::Access::transfer_read);
-        gpu::copy_texture_to_memory(commands, color, {.gpu = readback.range.gpu + mode * 256, .size = 256});
+        gpu::copy_texture_to_memory(commands, colors[format], {.gpu = readback.range.gpu + mode * 256, .size = 256});
         gpu::barrier(commands, gpu::Stage::transfer, gpu::Access::transfer_read, gpu::Stage::color_output, gpu::Access::color_write);
     }
     gpu::end_commands(commands);
     gpu::submit(device, {.commands = {commands}, .completion = {.semaphore = timeline, .value = 2}});
     gpu::wait_timeline({.semaphore = timeline, .value = 2});
     bool valid = true;
-    for (uint32 pixel = 0; pixel != 256; ++pixel)
-        valid &= readback.range.cpu[pixel * 4] == 255 && readback.range.cpu[pixel * 4 + 1] == 0 && readback.range.cpu[pixel * 4 + 3] == 255;
-    if (!valid) fprintf(stderr, "Metal direct/indexed/indirect raster readback failed.\n");
+    for (uint32 mode = 0; mode < 4; ++mode)
+        for (uint32 pixel = 0; pixel < 64; ++pixel)
+        {
+            const byte* value = readback.range.cpu + mode * 256 + pixel * 4;
+            const bool bgra = mode == 1 || mode == 2;
+            valid &= value[0] == (bgra ? 0 : 255) && value[1] == 0 && value[2] == (bgra ? 255 : 0) && value[3] == 255;
+        }
+    if (!valid) fprintf(stderr, "Metal direct/indexed/indirect raster and cross-format pipeline readback failed.\n");
     gpu::destroy_command_pool(pool);
     gpu::destroy_gpu_heap(readback);
     gpu::destroy_gpu_heap(arguments);
-    gpu::destroy_render_view(view);
-    gpu::destroy_texture(color);
-    gpu::destroy_texture_heap(heap);
-    gpu::destroy_pso(pso);
+    for (uint32 i = 0; i < 2; ++i)
+    {
+        gpu::destroy_render_view(views[i]);
+        gpu::destroy_texture(colors[i]);
+        gpu::destroy_texture_heap(heaps[i]);
+        gpu::destroy_pso(pipelines[i]);
+    }
     return valid;
 }
 
@@ -229,7 +259,8 @@ bool test_viewports_and_culling(gpu::Device* device, gpu::TimelineSemaphore* tim
     gpu::CommandPool* pool = gpu::create_command_pool(device);
     gpu::CommandBuffer* commands = gpu::begin_commands(pool);
     const gpu::TextureHeap heap = gpu::create_texture_heap(device, gpu::get_texture_size_align(device, desc).size);
-    gpu::Texture* color = gpu::create_texture(commands, desc, heap, 0);
+    gpu::Texture* color = gpu::create_texture(device, desc, heap, 0);
+    gpu::initialize_texture(commands, color);
     gpu::RenderView* view = gpu::create_render_view(color);
     const gpu::GpuHeap indices = gpu::create_gpu_heap(device, 32 + sizeof(gpu::ClearColor));
     *reinterpret_cast<gpu::ClearColor*>(indices.range.cpu + 32) = {.x = 1, .w = 1};
@@ -304,7 +335,8 @@ bool test_independent_pool_timestamps(gpu::Device* device)
         gpu::wait_timeline({.semaphore = timeline, .value = 1});
         for (gpu::CommandPool* pool : pools) gpu::read_timestamps(pool);
         for (uint32 i = 0; i < pool_count; ++i)
-            valid &= timestamps[i] != 0 && timestamps[i] != ~uint64{0} && (!i || timestamps[i] >= timestamps[i - 1]);
+            valid &= gpu::get_device_caps(device).timestamp_period_ns != 0
+                ? timestamps[i] != 0 && timestamps[i] != ~uint64{0} && (!i || timestamps[i] >= timestamps[i - 1]) : timestamps[i] == ~uint64{0};
     }
     gpu::destroy_timeline_semaphore(timeline);
     for (gpu::CommandPool* pool : pools) gpu::destroy_command_pool(pool);

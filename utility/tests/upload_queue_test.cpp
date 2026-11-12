@@ -136,8 +136,9 @@ static bool initialize(Fixture& fixture)
     CommandBuffer* initialization = begin_commands(fixture.pool);
     for (uint32 index = 0; index < texture_count; ++index)
     {
-        fixture.textures[index] = create_texture(initialization, fixture.descriptions[index], fixture.texture_heap, offsets[index]);
+        fixture.textures[index] = create_texture(fixture.device, fixture.descriptions[index], fixture.texture_heap, offsets[index]);
         if (!fixture.textures[index]) return false;
+        initialize_texture(initialization, fixture.textures[index]);
     }
     end_commands(initialization);
     submit(fixture.device, {.commands = {initialization},
@@ -599,6 +600,33 @@ static void run_queue_textures(Fixture& fixture, uint32 queue_index)
     check(fixture.ring.stats().peak_bytes <= 8192, "dedicated queue texture uploads retain bounded staging storage");
 }
 
+static void application_submit(void* context, Device* device, CommandBuffer* commands, TimelinePoint completion, uint32 queue_index) noexcept
+{
+    ++*static_cast<uint32*>(context);
+    submit(device, {.commands = {commands}, .completion = completion}, queue_index);
+}
+
+static void run_submission_handoff(Fixture& fixture)
+{
+    fixture.ring = UploadQueue(fixture.device, 256);
+    uint32 submissions = 0;
+    fixture.ring.set_submit_callback(application_submit, &submissions);
+    uint8 bytes[1024];
+    for (uint32 i = 0; i < sizeof(bytes); ++i) bytes[i] = uint8(i * 17u);
+    fixture.ring.upload_buffer({.gpu = fixture.buffer.range.gpu, .size = sizeof(bytes)}, {bytes, sizeof(bytes)});
+    memcpy(fixture.expected + guard_bytes, bytes, sizeof(bytes));
+    fixture.ring.wait();
+    check(submissions == 4 && fixture.ring.stats().submissions == submissions,
+        "application handoff receives automatic flushes and the final batch exactly once");
+    fixture.ring.set_submit_callback(nullptr);
+    bytes[0] = 123;
+    fixture.ring.upload_buffer({.gpu = fixture.buffer.range.gpu, .size = 4}, {bytes, 4});
+    memcpy(fixture.expected + guard_bytes, bytes, 4);
+    fixture.ring.wait();
+    check(submissions == 4 && fixture.ring.stats().submissions == 5, "clearing the handoff restores ordinary submission");
+    read_results(fixture);
+}
+
 int main(int argc, char** argv)
 {
 #if defined(_MSC_VER) && !defined(NDEBUG)
@@ -623,6 +651,7 @@ int main(int argc, char** argv)
     run_empty_batches_and_destroy(fixture);
     run_move_ownership(fixture);
     run_operation_limit(fixture);
+    run_submission_handoff(fixture);
 #if defined(NOGRAPHICSAPI_UPLOAD_QUEUE_SPV_PATH)
     run_compute_callbacks(fixture);
 #endif

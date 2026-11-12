@@ -200,9 +200,9 @@ void run(Worker& worker)
         }
         for (uint32 word = 0; word < buffer_size / sizeof(uint32); ++word)
         {
-            if (worker.readback.mapped[word] == worker.upload.mapped[word]) continue;
+            if (worker.readback.mapped[word] == worker.family * 0x1000000u + iteration * 0x100u + word) continue;
             fprintf(stderr, "Family %u, iteration %u, word %u: expected %08x, received %08x.\n",
-                    worker.family, iteration, word, worker.upload.mapped[word], worker.readback.mapped[word]);
+                    worker.family, iteration, word, worker.family * 0x1000000u + iteration * 0x100u + word, worker.readback.mapped[word]);
             uint64 completed = 0;
             const VkResult counter_result = vkGetSemaphoreCounterValue(worker.device, worker.timeline, &completed);
             const VkResult idle_result = vkQueueWaitIdle(worker.queue);

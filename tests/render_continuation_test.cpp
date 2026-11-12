@@ -2,6 +2,7 @@
 #include "shader_code.h"
 
 #include <stdio.h>
+#include <inttypes.h>
 #include <string.h>
 
 #if defined(_WIN32)
@@ -183,8 +184,9 @@ bool initialize(Fixture& fixture) noexcept
     };
     fixture.texture_heap = gpu::create_texture_heap(fixture.device, gpu::get_texture_size_align(fixture.device, target_desc).size);
     gpu::CommandBuffer* commands = gpu::begin_commands(fixture.readback_pool);
-    fixture.target = gpu::create_texture(commands, target_desc, fixture.texture_heap, 0);
+    fixture.target = gpu::create_texture(fixture.device, target_desc, fixture.texture_heap, 0);
     if (!fixture.target) return false;
+    gpu::initialize_texture(commands, fixture.target);
     fixture.view = gpu::create_render_view(fixture.target);
     if (!fixture.view) return false;
     gpu::end_commands(commands);
@@ -232,26 +234,42 @@ bool render_iteration(Fixture& fixture, uint32 iteration) noexcept
     gpu::submit(fixture.device, {.commands = {commands, iteration < 4 ? segment_count + 1 : 2}, .completion = fixture.completion});
     gpu::wait_timeline(fixture.completion);
     for (uint32 index = 0; index < (iteration < 4 ? segment_count : 1); ++index) gpu::read_timestamps(fixture.workers[index].pool);
-    bool valid = true;
+    uint32 pixel_errors = 0;
     for (uint32 y = 0; y < height; ++y)
         for (uint32 x = 0; x < width; ++x)
         {
             const uint8* pixel = fixture.readback.range.cpu + (y * width + x) * 4;
             const bool covered = x % 8 / 4 == (iteration & 1u);
-            valid &= pixel[0] == (covered ? 255 : 0) && pixel[1] == 0 && pixel[2] == 0 && pixel[3] == 255;
+            pixel_errors += !(pixel[0] == (covered ? 255 : 0) && pixel[1] == 0 && pixel[2] == 0 && pixel[3] == 255);
         }
+    bool valid = pixel_errors == 0;
+    uint32 timestamp_errors = 0;
+    uint32 zero_timestamps = 0;
     const uint64* timestamps = reinterpret_cast<const uint64*>(fixture.readback.range.cpu + pixel_bytes);
+    const bool timestamps_enabled = gpu::get_device_caps(fixture.device).timestamp_period_ns != 0;
     for (uint32 index = 0; index < segment_count * 2; ++index)
     {
-        if (iteration & 1u) valid &= timestamps[index] == ~uint64{0};
-        else valid &= timestamps[index] != ~uint64{0} && (index == 0 || timestamps[index] >= timestamps[index - 1]);
+        if (!timestamps_enabled || (iteration & 1u)) timestamp_errors += timestamps[index] != ~uint64{0};
+        else
+        {
+            zero_timestamps += timestamps[index] == 0;
+            timestamp_errors += timestamps[index] == ~uint64{0} || (index && timestamps[index] < timestamps[index - 1]);
+        }
     }
-    if ((iteration & 1u) == 0)
+    valid &= timestamp_errors == 0;
+    if (timestamps_enabled && (iteration & 1u) == 0)
     {
         valid &= timestamps[0] != fixture.previous_timestamp;
         fixture.previous_timestamp = timestamps[0];
     }
-    if (!valid) fprintf(stderr, "Render continuation pixel or timestamp readback failed in iteration %u.\n", iteration);
+    if (!valid)
+    {
+        fprintf(stderr, "Render continuation iteration %u: %u pixel errors, %u unwritten or unordered timestamps (%u zero values).\n",
+                iteration, pixel_errors, timestamp_errors, zero_timestamps);
+        if (timestamps_enabled && (iteration & 1u) == 0)
+            for (uint32 index = 0; index < segment_count * 2; ++index)
+                fprintf(stderr, "  timestamp[%u] = %" PRIu64 "\n", index, timestamps[index]);
+    }
     return valid;
 }
 
@@ -264,8 +282,9 @@ int main()
     if (initialized.error != gpu::Error::none) return 1;
     Fixture fixture{.device = initialized.device};
     bool valid = initialize(fixture);
-    for (uint32 iteration = 0; valid && iteration < 6; ++iteration)
-        valid = render_iteration(fixture, iteration);
+    if (valid)
+        for (uint32 iteration = 0; iteration < 6; ++iteration)
+            valid = render_iteration(fixture, iteration) && valid;
     gpu::wait_idle(fixture.device);
     for (uint32 index = 0; index < segment_count; ++index)
         gpu::destroy_command_pool(fixture.workers[index].pool);

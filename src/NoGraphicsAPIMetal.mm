@@ -1,6 +1,8 @@
 #include <NoGraphicsAPI/NoGraphicsAPI.hpp>
+#include "BufferAddressMap.hpp"
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#include <TargetConditionals.h>
 #include <mach/mach_time.h>
 #include <os/lock.h>
 #include <assert.h>
@@ -155,19 +157,12 @@ void set_error_callback(ErrorCallback callback) noexcept
     error_callback = callback;
 }
 
-struct BufferRecord
-{
-    uint64 base = 0;
-    uint64 size = 0;
-    uint64 buffer = 0;
-};
-
 struct GpuHeapOwner
 {
     Device* device = nullptr;
     id<MTLHeap> heap = nil;
     id<MTLBuffer> buffer = nil;
-    BufferRecord* record = nullptr;
+    detail::BufferRecord* record = nullptr;
 };
 
 struct TextureHeapOwner
@@ -311,6 +306,7 @@ struct Device
     Queue* queues = nullptr;
     id<MTL4Compiler> compiler = nil;
     id<MTLResidencySet> residency = nil;
+    id<MTLCommandQueue> presentation_queue = nil;
     CAMetalLayer* layer = nil;
     id<CAMetalDrawable> drawable = nil;
     CommandBuffer* acquired = nullptr;
@@ -318,11 +314,7 @@ struct Device
     DeviceCaps caps = {};
     char name[256] = {};
     os_unfair_lock residency_lock = OS_UNFAIR_LOCK_INIT;
-    BufferRecord buffer_records[64] = {};
-    alignas(64) uint64 buffer_snapshots[4096] = {};
-    uint64 buffer_snapshot = 0;
-    uint64 occupied_buffers = 0;
-    uint32 buffer_cursor = 1;
+    detail::BufferAddressMap buffer_map = {};
     CounterPage* counter_pages = nullptr;
     uint32 counter_page_count = 0;
     uint32 timestamp_query_count = 0;
@@ -476,10 +468,12 @@ id<MTLDepthStencilState> depth_state(CommandPool* pool, const DepthStencilState&
 
 void end_compute(CommandBuffer* commands)
 {
-    if (!commands->compute) return;
-    [commands->compute endEncoding];
-    [commands->compute release];
-    commands->compute = nil;
+    if (commands->compute)
+    {
+        [commands->compute endEncoding];
+        [commands->compute release];
+        commands->compute = nil;
+    }
 }
 
 id<MTL4CommandBuffer> native_commands(CommandBuffer* commands)
@@ -509,110 +503,9 @@ id<MTL4ComputeCommandEncoder> compute_encoder(CommandBuffer* commands)
     return commands->compute;
 }
 
-void update_buffer_index(Device* device, BufferRecord* record, bool insert)
-{
-    for (;;)
-    {
-        uint64 previous = __atomic_load_n(&device->buffer_snapshot, __ATOMIC_ACQUIRE);
-        const uint32 start = static_cast<uint32>(previous);
-        uint32 count = static_cast<uint32>(previous >> 32);
-        BufferRecord* snapshot[64];
-        for (uint32 i = 0; i < count; ++i)
-            snapshot[i] = reinterpret_cast<BufferRecord*>(__atomic_load_n(&device->buffer_snapshots[(start + i) & 4095], __ATOMIC_RELAXED));
-        if (insert)
-        {
-            assert(count < 64);
-            const uint64 base = __atomic_load_n(&record->base, __ATOMIC_RELAXED);
-            uint32 index = count++;
-            while (index && __atomic_load_n(&snapshot[index - 1]->base, __ATOMIC_RELAXED) > base)
-            {
-                snapshot[index] = snapshot[index - 1];
-                --index;
-            }
-            snapshot[index] = record;
-        }
-        else
-        {
-            uint32 index = 0;
-            while (index < count && snapshot[index] != record) ++index;
-            assert(index < count);
-            for (; index + 1 < count; ++index) snapshot[index] = snapshot[index + 1];
-            --count;
-        }
-        __atomic_thread_fence(__ATOMIC_ACQUIRE);
-        if (__atomic_load_n(&device->buffer_snapshot, __ATOMIC_RELAXED) != previous) continue;
-        const uint32 ticket = __atomic_fetch_add(&device->buffer_cursor, count ? count : 1, __ATOMIC_RELAXED);
-        __atomic_thread_fence(__ATOMIC_RELEASE);
-        for (uint32 i = 0; i < count; ++i)
-            __atomic_store_n(&device->buffer_snapshots[(ticket + i) & 4095], reinterpret_cast<uintptr>(snapshot[i]), __ATOMIC_RELAXED);
-        const uint64 next = (uint64(count) << 32) | ticket;
-        if (__atomic_compare_exchange_n(&device->buffer_snapshot, &previous, next, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) return;
-    }
-}
-
-void register_buffer(Device* device, GpuHeapOwner* owner, uint64 base, uint64 size)
-{
-    uint64 occupied = __atomic_load_n(&device->occupied_buffers, __ATOMIC_RELAXED);
-    for (;;)
-    {
-        assert(occupied != ~uint64{0});
-        const uint32 slot = static_cast<uint32>(__builtin_ctzll(~occupied));
-        if (__atomic_compare_exchange_n(&device->occupied_buffers, &occupied, occupied | (uint64{1} << slot), true,
-                                        __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
-        {
-            owner->record = &device->buffer_records[slot];
-            break;
-        }
-    }
-    // Observing recycled metadata must also make its preceding removal publication visible.
-    __atomic_thread_fence(__ATOMIC_RELEASE);
-    __atomic_store_n(&owner->record->base, base, __ATOMIC_RELAXED);
-    __atomic_store_n(&owner->record->size, size, __ATOMIC_RELAXED);
-    __atomic_store_n(&owner->record->buffer, reinterpret_cast<uintptr>(owner->buffer), __ATOMIC_RELAXED);
-    update_buffer_index(device, owner->record, true);
-}
-
-void unregister_buffer(Device* device, GpuHeapOwner* owner)
-{
-    update_buffer_index(device, owner->record, false);
-    __atomic_fetch_and(&device->occupied_buffers, ~(uint64{1} << (owner->record - device->buffer_records)), __ATOMIC_RELEASE);
-}
-
 id<MTLBuffer> resolve_buffer(Device* device, GpuRange range, uint64* offset)
 {
-    const uint64 address = reinterpret_cast<uintptr>(range.gpu);
-    for (;;)
-    {
-        const uint64 snapshot = __atomic_load_n(&device->buffer_snapshot, __ATOMIC_ACQUIRE);
-        const uint32 start = static_cast<uint32>(snapshot);
-        uint32 first = 0;
-        uint32 last = static_cast<uint32>(snapshot >> 32);
-        while (first < last)
-        {
-            const uint32 middle = first + (last - first) / 2;
-            const BufferRecord* record = reinterpret_cast<const BufferRecord*>(
-                __atomic_load_n(&device->buffer_snapshots[(start + middle) & 4095], __ATOMIC_RELAXED));
-            if (__atomic_load_n(&record->base, __ATOMIC_RELAXED) <= address) first = middle + 1;
-            else last = middle;
-        }
-        uint64 base = 0;
-        uint64 size = 0;
-        uint64 buffer = 0;
-        if (first)
-        {
-            const BufferRecord* record = reinterpret_cast<const BufferRecord*>(
-                __atomic_load_n(&device->buffer_snapshots[(start + first - 1) & 4095], __ATOMIC_RELAXED));
-            base = __atomic_load_n(&record->base, __ATOMIC_RELAXED);
-            size = __atomic_load_n(&record->size, __ATOMIC_RELAXED);
-            buffer = __atomic_load_n(&record->buffer, __ATOMIC_RELAXED);
-        }
-        // A stalled reader or writer surviving an entire ring reuse remains the accepted bounded-ring limitation.
-        __atomic_thread_fence(__ATOMIC_ACQUIRE);
-        if (__atomic_load_n(&device->buffer_snapshot, __ATOMIC_RELAXED) != snapshot) continue;
-        assert(first && address >= base && address - base <= size && range.size <= size - (address - base));
-        *offset = address - base;
-        return reinterpret_cast<id<MTLBuffer>>(buffer);
-    }
+    return reinterpret_cast<id<MTLBuffer>>(device->buffer_map.resolve(range, offset));
 }
 }
 
@@ -682,7 +575,8 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
             destroy_device(device);
             return {.error = Error::driver_error};
         }
-        for (uint32 i = 0; i < device->caps.queue_count; ++i) [device->queues[i].queue addResidencySet:device->residency];
+        for (uint32 i = 0; i < device->caps.queue_count; ++i)
+            [device->queues[i].queue addResidencySet:device->residency];
         device->timestamp_query_count = desc.timestamp_query_count;
         snprintf(device->name, sizeof(device->name), "%s", device->metal.name.UTF8String);
         mach_timebase_info_data_t timebase = {};
@@ -709,6 +603,20 @@ DeviceInit create_device(const DeviceDesc& desc) noexcept
             device->layer.pixelFormat = pixel_format(desc.swapchain_format == Format::undefined ? Format::bgra8_unorm : desc.swapchain_format);
             device->layer.maximumDrawableCount = desc.desired_swapchain_image_count < 3 ? 2 : 3;
             [device->queues[0].queue addResidencySet:device->layer.residencySet];
+            device->layer.framebufferOnly = YES;
+#if TARGET_OS_OSX
+            if (desc.steam_overlay_compatibility)
+            {
+                device->layer.framebufferOnly = NO;
+                device->presentation_queue = [device->metal newCommandQueue];
+                if (!device->presentation_queue)
+                {
+                    report_error("presentation queue", nil);
+                    destroy_device(device);
+                    return {.error = Error::driver_error};
+                }
+            }
+#endif
         }
         return {.device = device};
     }
@@ -722,6 +630,7 @@ void destroy_device(Device* device) noexcept
         assert(!device->drawable);
         if (device->layer) [device->queues[0].queue removeResidencySet:device->layer.residencySet];
         [device->drawable release];
+        [device->presentation_queue release];
         [device->layer release];
         for (uint32 i = 0; i < device->caps.queue_count; ++i)
         {
@@ -846,6 +755,12 @@ void wait_idle(Device* device) noexcept
             [device->queues[i].queue signalEvent:device->queues[i].completion value:++device->queues[i].submitted_value];
         for (uint32 i = 0; i < device->caps.queue_count; ++i)
             while (![device->queues[i].completion waitUntilSignaledValue:device->queues[i].submitted_value timeoutMS:1000]) {}
+        if (device->presentation_queue)
+        {
+            id<MTLCommandBuffer> drained = [device->presentation_queue commandBuffer];
+            [drained commit];
+            [drained waitUntilCompleted];
+        }
     }
 }
 
@@ -872,7 +787,7 @@ GpuHeap create_gpu_heap(Device* device, uint64 byte_count, MemoryType memory) no
             delete owner;
             return {};
         }
-        register_buffer(device, owner, owner->buffer.gpuAddress, byte_count);
+        owner->record = device->buffer_map.insert(owner->buffer.gpuAddress, byte_count, reinterpret_cast<uintptr>(owner->buffer));
         add_resident(device, device->shader_validation ? (id<MTLAllocation>)owner->buffer : (id<MTLAllocation>)owner->heap);
         return {.range = {.cpu = memory == MemoryType::gpu_only ? nullptr : static_cast<byte*>(owner->buffer.contents),
                           .gpu = reinterpret_cast<byte*>(owner->buffer.gpuAddress), .size = byte_count},
@@ -886,7 +801,7 @@ void destroy_gpu_heap(const GpuHeap& heap) noexcept
     {
         if (!heap.owner) return;
         GpuHeapOwner* owner = const_cast<GpuHeapOwner*>(heap.owner);
-        unregister_buffer(owner->device, owner);
+        owner->device->buffer_map.remove(owner->record);
         remove_resident(owner->device, owner->device->shader_validation ? (id<MTLAllocation>)owner->buffer : (id<MTLAllocation>)owner->heap);
         [owner->buffer release];
         [owner->heap release];
@@ -940,12 +855,11 @@ SizeAlign get_texture_size_align(Device* device, const TextureDesc& desc) noexce
     }
 }
 
-Texture* create_texture(CommandBuffer* commands, const TextureDesc& desc, const TextureHeap& heap, uint64 offset) noexcept
+Texture* create_texture(Device* device, const TextureDesc& desc, const TextureHeap& heap, uint64 offset) noexcept
 {
     @autoreleasepool
     {
-        Device* device = commands->device;
-        assert(commands->recording && !commands->render && heap.owner && heap.owner->device == device);
+        assert(device && heap.owner && heap.owner->device == device);
         MTLTextureDescriptor* descriptor = texture_descriptor(desc);
         id<MTLTexture> texture = [heap.owner->heap newTextureWithDescriptor:descriptor offset:offset];
         [descriptor release];
@@ -966,11 +880,11 @@ void destroy_texture(Texture* texture) noexcept
     }
 }
 
-void activate_texture_alias(CommandBuffer* commands, Texture* texture) noexcept
+void initialize_texture(CommandBuffer* commands, Texture* texture) noexcept
 {
-    assert(commands && texture && commands->device == texture->device && texture->desc.aliasable);
-    barrier(commands, Stage::all_commands, Access::transfer_write | Access::shader_write | Access::color_write | Access::depth_stencil_write,
-        Stage::all_commands, Access::none);
+    assert(commands && texture && commands->device == texture->device && commands->recording && !commands->render);
+    (void)commands;
+    (void)texture;
 }
 
 RenderView* create_render_view(Texture* texture, const RenderViewDesc& desc) noexcept
@@ -1134,7 +1048,7 @@ void copy_sampler_descriptors(const SamplerDescriptorHeap* source, uint32 source
             [destination->samplers[destination_index + i] release];
             destination->samplers[destination_index + i] = state;
             static_cast<MTLResourceID*>(destination->buffer.contents)[destination_index + i] =
-                static_cast<const MTLResourceID*>(source->buffer.contents)[source_index + i];
+                state ? state.gpuResourceID : MTLResourceID{};
         }
     }
 }
@@ -1452,8 +1366,19 @@ void submit_and_present(Device* device, const SubmitDesc& desc) noexcept
         assert(found);
         [device->queues[0].queue waitForDrawable:device->drawable];
         submit(device, desc, 0);
-        [device->queues[0].queue signalDrawable:device->drawable];
-        [device->drawable present];
+        if (device->presentation_queue)
+        {
+            // Steam's macOS overlay hooks command-buffer presentation, including frames rendered with Metal 4.
+            id<MTLCommandBuffer> presentation = [device->presentation_queue commandBuffer];
+            [presentation encodeWaitForEvent:device->queues[0].completion value:device->queues[0].submitted_value];
+            [presentation presentDrawable:device->drawable];
+            [presentation commit];
+        }
+        else
+        {
+            [device->queues[0].queue signalDrawable:device->drawable];
+            [device->drawable present];
+        }
         [device->drawable release];
         device->acquired->acquired = false;
         device->acquired = nullptr;
@@ -1490,7 +1415,7 @@ void copy_memory(CommandBuffer* commands, GpuRange source, GpuRange destination)
         id<MTLBuffer> source_buffer = resolve_buffer(commands->device, source, &source_offset);
         id<MTLBuffer> destination_buffer = resolve_buffer(commands->device, {.gpu = destination.gpu, .size = source.size}, &destination_offset);
         [compute_encoder(commands) copyFromBuffer:source_buffer sourceOffset:source_offset toBuffer:destination_buffer
-                               destinationOffset:destination_offset size:source.size];
+                                  destinationOffset:destination_offset size:source.size];
     }
 }
 
@@ -1541,8 +1466,8 @@ void copy_memory_to_texture(CommandBuffer* commands, GpuRange source, Texture* d
         id<MTLBuffer> buffer = resolve_buffer(commands->device, {.gpu = source.gpu, .size = copy.size}, &offset);
         for (uint32 slice = 0; slice < copy.slices; ++slice)
             [compute_encoder(commands) copyFromBuffer:buffer sourceOffset:offset + slice * copy.slice_pitch sourceBytesPerRow:copy.row_pitch
-                                 sourceBytesPerImage:copy.image_pitch sourceSize:copy.extent toTexture:destination->texture
-                                    destinationSlice:desc.base_slice + slice destinationLevel:desc.mip_level destinationOrigin:copy.origin];
+                                    sourceBytesPerImage:copy.image_pitch sourceSize:copy.extent toTexture:destination->texture
+                                      destinationSlice:desc.base_slice + slice destinationLevel:desc.mip_level destinationOrigin:copy.origin];
     }
 }
 
@@ -1556,8 +1481,8 @@ void copy_texture_to_memory(CommandBuffer* commands, Texture* source, GpuRange d
         id<MTLBuffer> buffer = resolve_buffer(commands->device, {.gpu = destination.gpu, .size = copy.size}, &offset);
         for (uint32 slice = 0; slice < copy.slices; ++slice)
             [compute_encoder(commands) copyFromTexture:source->texture sourceSlice:desc.base_slice + slice sourceLevel:desc.mip_level sourceOrigin:copy.origin
-                                           sourceSize:copy.extent toBuffer:buffer destinationOffset:offset + slice * copy.slice_pitch
-                               destinationBytesPerRow:copy.row_pitch destinationBytesPerImage:copy.image_pitch];
+                                              sourceSize:copy.extent toBuffer:buffer destinationOffset:offset + slice * copy.slice_pitch
+                                  destinationBytesPerRow:copy.row_pitch destinationBytesPerImage:copy.image_pitch];
     }
 }
 
@@ -1707,6 +1632,7 @@ void begin_render_pass(CommandBuffer* commands, const RenderingDesc& desc, Rende
     {
         assert(commands->recording && !commands->render && commands->pool->kind == QueueKind::general && desc.colors.size <= 8);
         end_compute(commands);
+        MTL4RenderPassDescriptor* pass = commands->pass;
         RenderView* area = desc.colors.size ? desc.colors.data[0].render_view :
                            desc.depth.render_view ? desc.depth.render_view : desc.stencil.render_view;
         for (uint32 i = 0; i < 8; ++i)
@@ -1714,21 +1640,21 @@ void begin_render_pass(CommandBuffer* commands, const RenderingDesc& desc, Rende
             if (i < desc.colors.size)
             {
                 const ColorAttachment& color = desc.colors.data[i];
-                render_attachment(commands->pass.colorAttachments[i], color.render_view, color.load, color.store);
-                commands->pass.colorAttachments[i].clearColor = MTLClearColorMake(color.clear.x, color.clear.y, color.clear.z, color.clear.w);
+                render_attachment(pass.colorAttachments[i], color.render_view, color.load, color.store);
+                pass.colorAttachments[i].clearColor = MTLClearColorMake(color.clear.x, color.clear.y, color.clear.z, color.clear.w);
                 if (!area) area = color.render_view;
             }
-            else commands->pass.colorAttachments[i].texture = nil;
+            else pass.colorAttachments[i].texture = nil;
         }
-        render_attachment(commands->pass.depthAttachment, desc.depth.render_view, desc.depth.load, desc.depth.store);
-        commands->pass.depthAttachment.clearDepth = desc.depth.clear;
-        render_attachment(commands->pass.stencilAttachment, desc.stencil.render_view, desc.stencil.load, desc.stencil.store);
-        commands->pass.stencilAttachment.clearStencil = desc.stencil.clear;
+        render_attachment(pass.depthAttachment, desc.depth.render_view, desc.depth.load, desc.depth.store);
+        pass.depthAttachment.clearDepth = desc.depth.clear;
+        render_attachment(pass.stencilAttachment, desc.stencil.render_view, desc.stencil.load, desc.stencil.store);
+        pass.stencilAttachment.clearStencil = desc.stencil.clear;
         assert(area);
         const NSUInteger width = area->texture.width >> area->mip;
         const NSUInteger height = area->texture.height >> area->mip;
-        commands->pass.renderTargetWidth = width ? width : 1;
-        commands->pass.renderTargetHeight = height ? height : 1;
+        pass.renderTargetWidth = width ? width : 1;
+        pass.renderTargetHeight = height ? height : 1;
         commands->render_continuation = flags != RenderingFlags::none;
         MTL4RenderEncoderOptions options = (static_cast<uint32>(flags) & static_cast<uint32>(RenderingFlags::suspending)) != 0 ?
                                           MTL4RenderEncoderOptionSuspending : MTL4RenderEncoderOptionNone;
@@ -1739,7 +1665,7 @@ void begin_render_pass(CommandBuffer* commands, const RenderingDesc& desc, Rende
         [commands->render setViewport:MTLViewport{0, double(height ? height : 1), double(width ? width : 1), -double(height ? height : 1), 0, 1}];
         [commands->render setScissorRect:MTLScissorRect{0, 0, width ? width : 1, height ? height : 1}];
         [commands->render setDepthStencilState:depth_state(commands->pool, {})];
-        if (commands->pso && commands->pso->render) bind_pso(commands, commands->pso);
+        commands->pso = nullptr;
     }
 }
 
@@ -1748,17 +1674,19 @@ void end_render_pass(CommandBuffer* commands) noexcept
     @autoreleasepool
     {
         assert(commands->render);
+        MTL4RenderPassDescriptor* pass = commands->pass;
         [commands->render endEncoding];
         [commands->render release];
         commands->render = nil;
+        commands->pso = nullptr;
         if (commands->render_continuation)
         {
             [commands->commands endCommandBuffer];
             commands->commands = nil;
         }
-        for (uint32 i = 0; i < 8; ++i) commands->pass.colorAttachments[i].texture = nil;
-        commands->pass.depthAttachment.texture = nil;
-        commands->pass.stencilAttachment.texture = nil;
+        for (uint32 i = 0; i < 8; ++i) pass.colorAttachments[i].texture = nil;
+        pass.depthAttachment.texture = nil;
+        pass.stencilAttachment.texture = nil;
     }
 }
 
@@ -1807,8 +1735,9 @@ void bind_pso(CommandBuffer* commands, const PSO* pso) noexcept
             if (commands->compute) [commands->compute setComputePipelineState:pso->compute];
             else compute_encoder(commands);
         }
-        else if (commands->render)
+        else
         {
+            assert(commands->render);
             [commands->render setRenderPipelineState:pso->render];
             [commands->render setCullMode:pso->rasterization.cull == CullMode::none ? MTLCullModeNone :
                                          pso->rasterization.cull == CullMode::clockwise ? MTLCullModeBack : MTLCullModeFront];
@@ -1862,7 +1791,8 @@ void draw_indirect(CommandBuffer* commands, const void* root, GpuRange arguments
         root_data(commands, root);
         if (!stride) stride = sizeof(MTLDrawPrimitivesIndirectArguments);
         for (uint32 i = 0; i < draw_count; ++i)
-            [commands->render drawPrimitives:MTLPrimitiveTypeTriangle indirectBuffer:reinterpret_cast<uintptr>(arguments.gpu) + i * stride];
+            [commands->render drawPrimitives:MTLPrimitiveTypeTriangle
+                             indirectBuffer:reinterpret_cast<uintptr>(arguments.gpu) + i * stride];
     }
 }
 
@@ -1897,7 +1827,8 @@ void dispatch_indirect(CommandBuffer* commands, const void* root, GpuRange argum
     {
         assert(commands->pso && commands->pso->compute);
         root_data(commands, root);
-        [compute_encoder(commands) dispatchThreadgroupsWithIndirectBuffer:reinterpret_cast<uintptr>(arguments.gpu) threadsPerThreadgroup:commands->pso->threads];
+        [compute_encoder(commands) dispatchThreadgroupsWithIndirectBuffer:reinterpret_cast<uintptr>(arguments.gpu)
+                                                   threadsPerThreadgroup:commands->pso->threads];
     }
 }
 

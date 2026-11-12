@@ -173,8 +173,9 @@ void record_textures(void* argument) noexcept
 
     for (uint32 index = 0; index != textures_per_thread; ++index)
     {
-        context->textures[index] = gpu::create_texture(context->upload_commands, texture_desc, *context->texture_heap,
+        context->textures[index] = gpu::create_texture(context->device, texture_desc, *context->texture_heap,
                                                      (context->index * textures_per_thread + index) * context->texture_stride);
+        gpu::initialize_texture(context->upload_commands, context->textures[index]);
         context->views[index] = gpu::create_render_view(context->textures[index]);
         gpu::write_texture_descriptor(context->texture_descriptors, index, context->textures[index], gpu::TextureDescriptorType::sampled);
         gpu::write_sampler_descriptor(context->sampler_descriptors, index);
@@ -256,17 +257,19 @@ bool test_parallel_recording(gpu::Device* device) noexcept
             gpu::wait_timeline({.semaphore = contexts[index].timeline, .value = 2});
             gpu::read_timestamps(contexts[index].pool);
             const uint64* timestamps = reinterpret_cast<const uint64*>(contexts[index].readback.range.cpu + textures_per_thread * texture_bytes);
-            if (timestamps[0] == ~uint64{0} || timestamps[1] == ~uint64{0} || timestamps[0] > timestamps[1])
+            if (gpu::get_device_caps(device).timestamp_period_ns != 0
+                    ? timestamps[0] == ~uint64{0} || timestamps[1] == ~uint64{0} || timestamps[0] > timestamps[1]
+                    : timestamps[0] != ~uint64{0} || timestamps[1] != ~uint64{0})
             {
                 fprintf(stderr, "Worker %u timestamp readback failed.\n", index);
                 valid = false;
             }
             for (uint32 word = 0; word != textures_per_thread * texture_bytes / sizeof(uint32); ++word)
             {
-                if (reinterpret_cast<uint32*>(contexts[index].upload.range.cpu)[word] == reinterpret_cast<uint32*>(contexts[index].readback.range.cpu)[word])
+                if ((0x12340000u + contexts[index].index * 0x1000u + word) == reinterpret_cast<uint32*>(contexts[index].readback.range.cpu)[word])
                     continue;
                 fprintf(stderr, "Worker %u texture %llu word %u: expected %08x, received %08x.\n", index, word * sizeof(uint32) / texture_bytes,
-                        word, reinterpret_cast<uint32*>(contexts[index].upload.range.cpu)[word],
+                        word, (0x12340000u + contexts[index].index * 0x1000u + word),
                         reinterpret_cast<uint32*>(contexts[index].readback.range.cpu)[word]);
                 fprintf(stderr, "Readback words 0=%08x 64=%08x last=%08x.\n", reinterpret_cast<uint32*>(contexts[index].readback.range.cpu)[0],
                         reinterpret_cast<uint32*>(contexts[index].readback.range.cpu)[64],
@@ -312,8 +315,11 @@ void submit_copies(void* argument) noexcept
         gpu::submit(context->device, {.commands = {commands}, .completion = {.semaphore = timeline, .value = iteration}}, context->index);
         gpu::wait_timeline({.semaphore = timeline, .value = iteration});
         gpu::read_timestamps(pool);
-        context->valid = memcmp(upload.range.cpu, readback.range.cpu, texture_bytes) == 0 && context->valid;
-        context->valid = *reinterpret_cast<const uint64*>(readback.range.cpu + texture_bytes) != ~uint64{0} && context->valid;
+        for (uint32 index = 0; index != texture_bytes / sizeof(uint32); ++index)
+            context->valid = reinterpret_cast<const uint32*>(readback.range.cpu)[index] ==
+                context->index * 0x10000u + iteration * 0x100u + index && context->valid;
+        context->valid = (*reinterpret_cast<const uint64*>(readback.range.cpu + texture_bytes) != ~uint64{0}) ==
+                         (gpu::get_device_caps(context->device).timestamp_period_ns != 0) && context->valid;
         gpu::reset_command_pool(pool);
     }
     gpu::destroy_command_pool(pool);
@@ -358,7 +364,8 @@ bool test_multiple_queues(gpu::Device* device, bool queue_families) noexcept
     gpu::submit(device, {.commands = {producer}, .completion = {.semaphore = produced, .value = 1}});
     gpu::wait_timeline({.semaphore = consumed, .value = 1});
     gpu::wait_timeline({.semaphore = produced, .value = 1});
-    valid = memcmp(upload.range.cpu, readback.range.cpu, texture_bytes) == 0 && valid;
+    for (uint32 index = 0; index != texture_bytes / sizeof(uint32); ++index)
+        valid = reinterpret_cast<const uint32*>(readback.range.cpu)[index] == 0xcafe0000u + index && valid;
     gpu::destroy_command_pool(consumer_pool);
     gpu::destroy_command_pool(producer_pool);
     gpu::destroy_gpu_heap(readback);

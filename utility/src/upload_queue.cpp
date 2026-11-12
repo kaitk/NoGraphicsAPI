@@ -211,7 +211,8 @@ TimelinePoint UploadQueue::flush() noexcept
     barrier(state.commands, state.upload_stages, state.upload_access, Stage::all_commands, state.queue_access);
     end_commands(state.commands);
     ++state.completion.value;
-    submit(state.device, {.commands = {state.commands}, .completion = state.completion}, state.queue_index);
+    if (state.submit_callback) state.submit_callback(state.submit_context, state.device, state.commands, state.completion, state.queue_index);
+    else submit(state.device, {.commands = {state.commands}, .completion = state.completion}, state.queue_index);
     Batch& batch = state.batches[(state.retirement_first + state.retirement_count) % state.max_pending_batches];
     batch.end = state.head;
     batch.value = state.completion.value;
@@ -220,6 +221,13 @@ TimelinePoint UploadQueue::flush() noexcept
     state.commands = nullptr;
     state.operation_count = 0;
     return state.completion;
+}
+
+void UploadQueue::set_submit_callback(SubmitCallback callback, void* context) noexcept
+{
+    assert(!state_.in_callback);
+    state_.submit_callback = callback;
+    state_.submit_context = context;
 }
 
 void UploadQueue::wait() noexcept

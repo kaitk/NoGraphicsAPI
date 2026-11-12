@@ -1,14 +1,14 @@
 # NoGraphicsAPI
 
-NoGraphicsAPI is a C++20 graphics library designed for the latest **Metal 4** devices and **Vulkan 1.4** devices with
-**`VK_EXT_descriptor_heap`**, **`VK_KHR_device_address_commands`**, and **`VK_EXT_mesh_shader`**.
+NoGraphicsAPI is a C++20 graphics library for **Metal 4** devices and **Vulkan 1.4** devices with
+**`VK_EXT_descriptor_heap`** and **`VK_EXT_mesh_shader`**.
 It implements the ideas in Sebastian Aaltonen's [*No Graphics API*](https://www.sebastianaaltonen.com/blog/no-graphics-api)
 with GPU pointers, descriptor heaps, and shared Slang shaders.
 
 The goal is to make GPU programming feel more like working with ordinary memory and data structures:
 GPU pointers for data, heap indices for textures, and one GPU pointer to the arguments of each draw or dispatch.
 
-Metal 4 and Vulkan are supported native backends. CMake selects Metal on macOS/iOS and Vulkan on Windows/Linux.
+Metal and Vulkan are supported native backends. CMake selects Metal on macOS/iOS and Vulkan on Windows/Linux.
 Both use the same C++ API and Slang sources. Windows and macOS include windowed examples. Linux presents to a Wayland surface, or an X11 window through Xlib, that the application creates.
 
 ## What changes from classic rendering?
@@ -56,6 +56,7 @@ struct RootArguments
     Material* material;
     float4x4 transform;
     uint32 texture_index;
+    uint32 padding[3];
 };
 ```
 
@@ -82,22 +83,22 @@ Texture2D<float4> texture = gpu_texture<Texture2D<float4>>(root.texture_index);
 ```
 
 Draws and dispatches take GPU root pointers directly, including roots written by earlier GPU work. All graphics stages share the same root.
+Roots follow the [shared constant-buffer layout](docs/slang.md#root-and-pointer-layout); pointed-to data keeps C POD layout.
 Keep each root allocation alive and stable until its GPU use completes.
 See the [design comparison](docs/no-graphics-api-comparison.md) for the remaining differences and
 the [shader guide](docs/slang.md) for complete examples.
 
 ## Native implementations
 
-Metal 4 supplies native GPU addresses, draw/dispatch commands that accept those addresses, and
-`MTLTextureViewPool` for indexed textures. Vulkan supplies the equivalent model through device-address
-commands and descriptor heaps. See [Metal implementation](docs/metal-support.md) and
+Metal 4 draw/dispatch commands accept native GPU addresses directly and use `MTLTextureViewPool` for indexed textures.
+Vulkan uses device-address commands when available and resolves addresses to backing buffers otherwise. See [Metal implementation](docs/metal-support.md) and
 [Vulkan implementation](docs/vulkan-support.md) for how these map to NoGraphicsAPI.
 
 ## Hardware requirements
 
-### Metal 4
+### Metal
 
-Requires macOS, iOS or iPadOS 26+ and Apple GPU family 7 or newer with Metal 4.
+Requires Metal 4, macOS, iOS or iPadOS 26+, and Apple GPU family 7 or newer.
 
 | Platform | Supported devices |
 | --- | --- |
@@ -120,10 +121,10 @@ The Vulkan backend targets little-endian x86-64; utility math requires AVX2 and 
 Vulkan 1.4 alone is insufficient. Required extensions include:
 
 - [`VK_EXT_descriptor_heap`][descriptor-heap] — application-owned descriptor heaps.
-- [`VK_KHR_device_address_commands`][address-commands] — commands operating on GPU addresses.
 - [`VK_EXT_mesh_shader`][mesh-shader] — task and mesh shaders.
 - [`VK_KHR_shader_untyped_pointers`](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_shader_untyped_pointers.html) — descriptor-heap shader support.
 
+[`VK_KHR_device_address_commands`][address-commands] is optional: without it, command addresses resolve to backing buffers and offsets.
 [`VK_KHR_unified_image_layouts`][unified-layouts] is optional and makes the backend's common image layout efficient.
 See the [Vulkan implementation](docs/vulkan-support.md) for the complete feature contract.
 
@@ -137,22 +138,24 @@ and [NVIDIA 616.64 WHQL](https://us.download.nvidia.com/Windows/616.64/616.64-wi
 
 | Architecture | Driver snapshot | Products | CPU-visible heap | Required extensions |
 | --- | --- | --- | --- | --- |
-| AMD RDNA 2 (dGPU) | Windows / Adrenalin 26.9.1 | [RX 6000][rdna2-rebar] | PCIe ReBAR or<br>🔴 [256 MiB fixed BAR][rdna2-fixed] | 🔴 Unsupported |
+| AMD RDNA 2 (dGPU) | Windows / Adrenalin 26.9.1 | [RX 6000][rdna2-rebar] | ReBAR | 🔴 Unsupported |
 | AMD RDNA 2 (iGPU) | Windows / Adrenalin 26.9.1 | [600M](https://vulkan.gpuinfo.org/displayreport.php?id=47714) | UMA | 🔴 Unsupported |
 | AMD RDNA 2 (iGPU) | Linux / Mesa RADV 26.2+ | [Steam Deck](https://vulkan.gpuinfo.org/displayreport.php?id=51189) | UMA | Supported |
-| AMD RDNA 3 (dGPU) | Windows / Adrenalin 26.9.1 | [RX 7000](https://vulkan.gpuinfo.org/displayreport.php?id=51443) | PCIe ReBAR | Supported |
+| AMD RDNA 3 (dGPU) | Windows / Adrenalin 26.9.1 | [RX 7000](https://vulkan.gpuinfo.org/displayreport.php?id=51443) | ReBAR | Supported |
 | AMD RDNA 3 (iGPU) | Windows / Adrenalin 26.9.1 | [700M](https://vulkan.gpuinfo.org/displayreport.php?id=49646) | UMA | Supported |
-| AMD RDNA 4 (dGPU) | Windows / Adrenalin 26.9.1 | [RX 9000](https://vulkan.gpuinfo.org/displayreport.php?id=51293) | PCIe ReBAR | Supported |
-| NVIDIA Turing | Windows / NVIDIA 616.64 | [GTX 16 series][gtx16] | 🔴 [256 MiB fixed BAR][turing-rebar] | Supported |
-| NVIDIA Turing | Windows / NVIDIA 616.64 | [RTX 20 series][turing] | 🔴 [256 MiB fixed BAR][turing-rebar] | Supported |
-| NVIDIA Ampere | Windows / NVIDIA 616.64 | [RTX 30 series](https://vulkan.gpuinfo.org/displayreport.php?id=51549) | PCIe ReBAR | Supported |
-| NVIDIA Ada Lovelace | Windows / NVIDIA 616.64 | [RTX 40 series](https://vulkan.gpuinfo.org/displayreport.php?id=51469) | PCIe ReBAR | Supported |
-| NVIDIA Blackwell | Windows / NVIDIA 616.64 | [RTX 50 series](https://vulkan.gpuinfo.org/displayreport.php?id=51573) | PCIe ReBAR | Supported |
+| AMD RDNA 4 (dGPU) | Windows / Adrenalin 26.9.1 | [RX 9000](https://vulkan.gpuinfo.org/displayreport.php?id=51293) | ReBAR | Supported |
+| NVIDIA Turing | Windows / NVIDIA 616.64 | [GTX 16 series][gtx16] | [256MB][turing-rebar] | Supported |
+| NVIDIA Turing | Windows / NVIDIA 616.64 | [RTX 20 series][turing] | [256MB][turing-rebar] | Supported |
+| NVIDIA Ampere | Windows / NVIDIA 616.64 | [RTX 30 series](https://vulkan.gpuinfo.org/displayreport.php?id=51549) | ReBAR | Supported |
+| NVIDIA Ada Lovelace | Windows / NVIDIA 616.64 | [RTX 40 series](https://vulkan.gpuinfo.org/displayreport.php?id=51469) | ReBAR | Supported |
+| NVIDIA Blackwell | Windows / NVIDIA 616.64 | [RTX 50 series](https://vulkan.gpuinfo.org/displayreport.php?id=51573) | ReBAR | Supported |
 
-🔴 marks missing extensions or a capacity-limited fixed BAR. Mapped heaps require coherent CPU-visible
-GPU memory. Enable ReBAR where available on discrete GPUs; integrated GPUs use UMA. A fixed BAR can
-still work, but limits mapped-heap capacity. Separate GPU-only allocations can use the remaining VRAM.
-UMA heap sizes depend on system configuration.
+🔴 marks missing required extensions. Mapped heaps require coherent CPU-visible GPU memory.
+Enable PCIe ReBAR where available on discrete GPUs; integrated GPUs use UMA, with heap sizes depending on system configuration.
+
+GPUs without PCIe ReBAR support provide up to 256 MB of CPU-visible data heap memory. NoGraphicsAPI can be used on these GPUs,
+but applications must minimize CPU-visible data. GPU-only heaps have no ReBAR-related size limit; use copy commands to copy data
+into GPU-only heaps. Texture heaps are unaffected by PCIe ReBAR.
 
 The checked Windows RDNA 2 reports lack descriptor-heap support.
 [Pascal / GTX 10](https://vulkan.gpuinfo.org/displayreport.php?id=51084) lacks the required extensions.
@@ -233,7 +236,7 @@ The executables are under `build-msvc/examples/<example>/Release` when using the
 
 - [Comparison with *No Graphics API*](docs/no-graphics-api-comparison.md)
 - [Vulkan implementation](docs/vulkan-support.md)
-- [Metal 4 implementation](docs/metal-support.md)
+- [Metal implementation](docs/metal-support.md)
 - [Slang shaders and root ABI](docs/slang.md)
 - [Public API](include/NoGraphicsAPI/NoGraphicsAPI.hpp)
 - [Metal validation and limitations](docs/metal-validation.md)
@@ -249,7 +252,6 @@ See [third-party notices](THIRD_PARTY_NOTICES.md) for bundled assets and depende
 [address-commands]: https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_device_address_commands.html
 [unified-layouts]: https://www.khronos.org/blog/so-long-image-layouts-simplifying-vulkan-synchronisation
 [rdna2-rebar]: https://vulkan.gpuinfo.org/displayreport.php?id=42800
-[rdna2-fixed]: https://vulkan.gpuinfo.org/displayreport.php?id=48951
 [gtx16]: https://vulkan.gpuinfo.org/displayreport.php?id=51563
 [turing]: https://vulkan.gpuinfo.org/displayreport.php?id=51475
 [turing-rebar]: https://www.nvidia.com/en-us/geforce/graphics-cards/compare/?section=compare-specs
