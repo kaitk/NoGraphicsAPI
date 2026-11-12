@@ -1006,18 +1006,19 @@ bool select_texture_memory_type(Device& device) noexcept
     uint32 memory_type_bits = color_requirements.memoryTypeBits;
     include_texture_heap_alignment(device, color_requirements);
 
-    // 4x transient color and depth attachments share the texture heaps.
-    constexpr VkFormat transient_formats[]{VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D32_SFLOAT};
+    // 4x transient color and depth attachments share the texture heaps. Their memory types are kept only where some remain:
+    // a tiler may offer transient images lazily allocated memory alone, which the heaps don't use.
+    constexpr VkFormat transient_formats[]{VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT};
     image_info.samples = VK_SAMPLE_COUNT_4_BIT;
     for (VkFormat format : transient_formats)
     {
         image_info.format = format;
         image_info.usage = VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT |
-                           (format == VK_FORMAT_D32_SFLOAT ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
+                           (format == VK_FORMAT_R8G8B8A8_UNORM ? VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT : VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT);
         if (!supports_image_create_info(device, image_info))
             continue;
         const VkMemoryRequirements requirements = image_memory_requirements(device, image_info);
-        memory_type_bits &= requirements.memoryTypeBits;
+        if ((memory_type_bits & requirements.memoryTypeBits) != 0) memory_type_bits &= requirements.memoryTypeBits;
         include_texture_heap_alignment(device, requirements);
     }
     image_info.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -2765,8 +2766,9 @@ void prepare_texture(Device& device, const TextureDesc& desc, PreparedTexture& o
     if (has_flag(desc.usage, TextureUsage::transfer_source)) usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     if (has_flag(desc.usage, TextureUsage::transfer_destination)) usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     if (has_flag(desc.usage, TextureUsage::transient)) usage |= VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
-    assert(!has_flag(desc.usage, TextureUsage::transient) || (usage & ~(VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                                                                          VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) == 0);
+    assert(!has_flag(desc.usage, TextureUsage::transient) ||
+           ((usage & ~(VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) == 0 &&
+            (usage & (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) != 0));
     assert((desc.sample_count == 1 || desc.sample_count == 4) && (desc.sample_count == 1 || (desc.type == TextureType::two_d && desc.mip_levels == 1)));
 
     const VkImageType image_type = to_vk(desc.type);
